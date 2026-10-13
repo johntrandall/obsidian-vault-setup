@@ -1,0 +1,135 @@
+# obsidian-vault-setup configuration — EXAMPLE.
+#
+# Copy to ~/.config/obsidian-vault-setup/config.yaml (`obsidian-vault-setup init-config` does it), or point
+# $OBSIDIAN_VAULT_SETUP_CONFIG at any file with this shape. Edit freely: this file is only a starting point.
+#
+# The model: every NEW vault gets every plugin with `roster: true` installed. The vault's PROFILE decides
+# which of them start switched on. After that you only toggle plugins on and off in
+# Settings -> Community plugins; you never install anything by hand. Settings below are applied when the
+# plugin is installed, so a plugin you switch on later already has them.
+
+schema_version: 1
+
+# --------------------------------------------------------------------------------------------------
+# profiles: named sets of plugins to switch ON. `obsidian-new-vault --profile <name>`; the default is
+# core-only. A profile may only name plugins listed under `plugins:` below.
+# --------------------------------------------------------------------------------------------------
+profiles:
+  core-only:
+    description: Nothing switched on. The roster is still installed, switched off, ready to toggle.
+    plugins: []
+
+  review:
+    description: Review documents (e.g. AI-written drafts) as CriticMarkup suggestions you accept or reject.
+    plugins: [track-changes]
+
+  review-repo:
+    description: A git repository you review in Obsidian and commit from inside Obsidian.
+    plugins: [track-changes, obsidian-git]
+
+  knowledge-base:
+    description: A long-lived notes vault where links must stay intact as files move.
+    plugins:
+      - obsidian-dangling-links
+      - persistent-links
+      - external-rename-handler
+      - automatic-table-of-contents
+      - obsidian-advanced-uri
+
+# --------------------------------------------------------------------------------------------------
+# plugins: the roster. Keys are community-directory plugin ids.
+#   name              display name (for your reference)
+#   expected_author   checked after install: plugin ids are NOT unique across the ecosystem, and a
+#                     same-id plugin by another author is switched off and reported instead of used
+#   source            directory (installed with `obsidian plugin:install`) | github (needs `install: brat`)
+#   install           optional: brat — install a GitHub-only plugin through the BRAT plugin, with `repo`
+#   repo              owner/repo (required for install: brat; informational otherwise)
+#   roster            true = installed (switched off unless a profile enables it) in every new vault
+#   settings          optional: values merged into the plugin's own settings and saved by the plugin
+#   used_for          optional: why you have it
+# --------------------------------------------------------------------------------------------------
+plugins:
+  track-changes:
+    name: Track Changes
+    expected_author: Phil Baum
+    repo: philphilphil/obsidian-track-changes
+    source: directory
+    roster: true
+    used_for: Accept / reject / reply to CriticMarkup suggestions in a side panel.
+    settings:
+      localAuthorName: Your Name        # your marks vs. anyone else's are told apart by author
+
+  obsidian-git:
+    name: Git
+    expected_author: Vinzent
+    repo: vinzent03/obsidian-git
+    source: directory
+    roster: true
+    used_for: Commit, pull and push a vault that is a git repository, from inside Obsidian.
+    settings: {}                        # defaults keep every automatic commit/push/pull interval off
+
+  obsidian-advanced-uri:
+    name: Advanced URI
+    expected_author: Vinzent
+    repo: vinzent03/obsidian-advanced-uri
+    source: directory
+    roster: true
+    used_for: obsidian://adv-uri links that open headings, run commands or write to notes.
+
+  obsidian-dangling-links:
+    name: Dangling links
+    expected_author: Graydon Hoare
+    repo: graydon/obsidian-dangling-links
+    source: directory
+    roster: true
+
+  persistent-links:
+    name: Persistent Links
+    expected_author: Ivan Lednev
+    repo: ivan-lednev/obsidian-persistent-links
+    source: directory
+    roster: true
+
+  external-rename-handler:
+    name: External Rename Handler
+    expected_author: mnaoumov
+    repo: mnaoumov/obsidian-external-rename-handler
+    source: directory
+    roster: true
+    used_for: Keeps links intact when files are renamed outside Obsidian (git, scripts, agents).
+
+  automatic-table-of-contents:
+    name: Automatic Table Of Contents
+    expected_author: Johan Satgé
+    repo: johansatge/obsidian-automatic-table-of-contents
+    source: directory
+    roster: true
+
+  unhide:
+    name: Unhide (formerly Show Hidden Files)
+    expected_author: polyipseity
+    repo: polyipseity/obsidian-unhide
+    source: directory
+    roster: true
+    used_for: Shows dotfiles (.github/, .claude/) in a repository vault.
+
+  # Example of a GitHub-only plugin, installed through BRAT from inside Obsidian (left off the roster).
+  # some-beta-plugin:
+  #   name: Some Beta Plugin
+  #   expected_author: someone
+  #   repo: someone/obsidian-some-beta-plugin
+  #   source: github
+  #   install: brat
+  #   roster: true
+
+# --------------------------------------------------------------------------------------------------
+# banned: never installed or enabled; the tool refuses to work on a vault where one is switched on.
+#   reason   shown when the tool refuses
+# --------------------------------------------------------------------------------------------------
+banned:
+  inkling:
+    name: Inkling
+    expected_author: Andrew Brož
+    reason: >-
+      Example entry. In the author's use, Inkling and Track Changes active together on the same notes
+      produced runaway nested CriticMarkup in suggesting mode. Remove this entry if you use Inkling alone.

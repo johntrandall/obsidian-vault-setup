@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+"""obsidian-vault-setup — make a folder an Obsidian vault and give it your plugin roster,
+using only Obsidian's own surfaces. Source: ~/dev/obsidian-vault-setup (see README.md).
+
+Every write goes through the official Obsidian CLI talking to the running app. This program never
+opens, writes or copies a file under `.obsidian/` and never edits obsidian.json (it reads them in
+`scan` only). Obsidian, BRAT and each plugin write their own files.
+
+Commands:
+  open  [<folder>] [--profile p] [--launch] [--notify]   open the vault at the folder's git root, or create it
+  new   [<folder>] [--profile p] [--extra id ...]        make a vault: install the whole roster, enable the profile's set
+  apply <vault> --profile p [--roster] [--register]      bring an existing vault to a profile (idempotent)
+  plan  <vault> --profile p                              dry run
+  scan                                                   read-only: every registered vault's plugins
+  forget <folder>                                        unregister a closed vault (files untouched)
+  doctor                                                 probe the CLI and every undocumented API we depend on
+  init-config                                            create the config from config.example.yaml
+  install-finder-button                                  build ~/Applications/Open in Obsidian.app
+
+Config (roster, profiles, settings, banned list), first found of:
+  $OBSIDIAN_VAULT_SETUP_CONFIG, $XDG_CONFIG_HOME/obsidian-vault-setup/config.yaml (~/.config/...).
+  Start from config.example.yaml: `obsidian-vault-setup init-config`.
+
+UNDOCUMENTED APIs (convention: `undocumented-api-usage` skill). Each call site carries a
+`UNDOCUMENTED-API(<id>)` comment; `doctor` probes them; README.md § "Undocumented APIs" is the registry.
+  vault-open-ipc     electron.ipcRenderer.sendSync('vault-open', path, false)  — register + open a folder
+  vault-remove-ipc   electron.ipcRenderer.sendSync('vault-remove', path)       — unregister (closed vault)
+  plugin-settings    app.plugins.plugins[id].settings + saveSettings()          — plugin's own settings save
+  brat-addplugin     BRAT betaPlugins.addPlugin(repo, …)                         — GitHub-only plugin install
+Verified against Obsidian app 1.14.4 (installer 1.12.4) and BRAT 2.2.0, 2026-10-13.
+"""
+import argparse
+import glob
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+import yaml
+
+CONFIG_DIR = os.path.join(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "obsidian-vault-setup")
+MANIFEST = os.path.expanduser(os.environ.get("OBSIDIAN_VAULT_SETUP_CONFIG")
+                              or os.environ.get("OBSIDIAN_PLUGIN_MANIFEST")      # older name, still honoured
+                              or os.path.join(CONFIG_DIR, "config.yaml"))
+SHARE_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))   # repo root, or Homebrew libexec
+EXAMPLE_CONFIG = os.path.join(SHARE_DIR, "config.example.yaml")
+FINDER_SCRIPT = os.path.join(SHARE_DIR, "finder", "open-in-obsidian.applescript")
+FINDER_APP = os.path.expanduser("~/Applications/Open in Obsidian.app")
+VERIFIED_APP_VERSION = "1.14.4"   # the undocumented APIs below were last verified on this app version
+OBSIDIAN_JSON = os.path.expanduser("~/Library/Application Support/obsidian/obsidian.json")
+CLI = shutil.which("obsidian") or "/Applications/Obsidian.app/Contents/MacOS/obsidian"
+HOME = os.path.expanduser("~")
+
+
+def short(path):
+    return path.replace(HOME, "~", 1)
+
+
+def cli(*args, vault=None, timeout=60):
+    """Run the Obsidian CLI. It exits 0 even on errors, so callers read the text.
+
+    Run from "/": without vault=, the CLI targets the registered vault that contains the working
+    directory, and when that vault is not open it prints NOTHING (exit 0). ~/dev is a registered vault,
+    so any cwd under ~/dev silently fails (Verified 2026-10-13)."""
+    cmd = [CLI] + ([f"vault={vault}"] if vault else []) + list(args)
+    result = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout,
+                            cwd="/")
+    return (result.stdout + result.stderr).strip()
+
+
+def cli_eval(code, vault):
+    out = cli("eval", f"code={code}", vault=vault)
+    return out[3:].strip() if out.startswith("=> ") else out
+
+
+def load_manifest():
+    if not os.path.exists(MANIFEST):
+        sys.exit(f"No config at {short(MANIFEST)}. Create one from the example: obsidian-vault-setup init-config")
+    with open(MANIFEST) as f:
+        return yaml.safe_load(f)
+
+
+def obsidian_running():
+    return subprocess.run(["pgrep", "-x", "Obsidian"], capture_output=True).returncode == 0
+
+
+def registered_vaults():
+    """name -> set of paths, as the CLI resolves vault=<name>."""
+    names = {}
+    for line in cli("vaults", "verbose").splitlines():
+        if "\t" in line:
+            name, path = line.split("\t", 1)
+            names.setdefault(name, set()).add(path)
+    return names
+
+
+def installed_plugins(vault):
+    out = cli("plugins", "filter=community", "versions", "format=json", vault=vault)
+    try:
+        return {p["id"]: p.get("version") for p in json.loads(out)}
+    except json.JSONDecodeError:
+        return {}
+
+
+def enabled_plugins(vault):
+    out = cli("plugins:enabled", "filter=community", vault=vault)
+    return {line.split("\t")[0] for line in out.splitlines() if line.strip()}
+
+
+def plugin_info(vault, plugin_id):
+    info = {}
+    for line in cli("plugin", f"id={plugin_id}", vault=vault).splitlines():
+        if "\t" in line:
+            key, value = line.split("\t", 1)
+            info[key] = value
+    return info
+
+
+# ---------------------------------------------------------------------------------- scan
+
+def cmd_scan(_args):
+    """Read-only: every registered vault, its enabled and installed community plugins."""
+    with open(OBSIDIAN_JSON) as f:
+        config = json.load(f)
+    paths = sorted({v["path"] for v in config["vaults"].values()})
+    banned = set(load_manifest().get("banned", {}))
+    for path in paths:
+        config_dir = os.path.join(path, ".obsidian")
+        try:
+            with open(os.path.join(config_dir, "community-plugins.json")) as f:
+                enabled = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            enabled = []
+        installed = {}
+        for manifest_path in glob.glob(os.path.join(config_dir, "plugins", "*", "manifest.json")):
+            with open(manifest_path) as f:
+                m = json.load(f)
+            installed[m["id"]] = (m.get("version"), m.get("author"))
+        if not installed:
+            continue
+        print(f"\n{short(path)}")
+        for plugin_id, (version, author) in sorted(installed.items()):
+            state = "on " if plugin_id in enabled else "off"
+            flag = "  <-- BANNED" if plugin_id in banned and plugin_id in enabled else ""
+            print(f"  {state} {plugin_id:32} {version:10} {author}{flag}")
+
+
+# ----------------------------------------------------------------------------- plan/apply
+
+def resolve(args, manifest):
+    profiles = manifest["profiles"]
+    if args.profile not in profiles:
+        sys.exit(f"Unknown profile {args.profile!r}. Profiles: {', '.join(profiles)}")
+    wanted = list(profiles[args.profile]["plugins"]) + list(args.extra or [])
+    banned = manifest.get("banned", {})
+    for plugin_id in wanted:
+        if plugin_id in banned:
+            sys.exit(f"REFUSED: {plugin_id} is banned: {banned[plugin_id]['reason'].strip()}")
+        if plugin_id not in manifest["plugins"]:
+            sys.exit(f"{plugin_id} is not in the config. Add it to {short(MANIFEST)} first.")
+    return wanted
+
+
+def cmd_plan(args):
+    manifest = load_manifest()
+    wanted = resolve(args, manifest)
+    path = os.path.abspath(os.path.expanduser(args.vault))
+    print(f"Vault {short(path)} -> profile {args.profile}")
+    print(f"  name the CLI will use: {os.path.basename(path)}")
+    if wanted:
+        print("  plugins:restrict off")
+    for plugin_id in wanted:
+        p = manifest["plugins"][plugin_id]
+        how = ("plugin:install id=%s enable" % plugin_id) if p["source"] == "directory" \
+            else f"HAND-OFF: not the directory plugin; install {p['repo']} (see skill section 5)"
+        print(f"  {plugin_id:30} {how}; expect author {p['expected_author']}")
+        for key, value in (p.get("settings") or {}).items():
+            print(f"      setting {key} = {value!r}")
+
+
+def wait_for_install(vault, plugin_id, seconds=90):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if plugin_id in installed_plugins(vault):
+            return True
+        time.sleep(3)
+    return False
+
+
+def apply_settings(vault, plugin_id, settings):
+    # UNDOCUMENTED-API(plugin-settings): `app.plugins.plugins[id]` and the plugin's own `settings` object +
+    # `saveSettings()`. Conventional for Obsidian plugins (sample-plugin pattern), not a public contract.
+    # Breaks as: 'NOT LOADED' / 'NO saveSettings', or the value reverts after reload.
+    # Fallback: the user sets it in Settings -> Community plugins -> <plugin>.
+    payload = json.dumps(settings)
+    code = (
+        "(async()=>{const p=app.plugins.plugins[%s]; if(!p) return 'NOT LOADED';"
+        " if(typeof p.saveSettings!=='function') return 'NO saveSettings';"
+        " const merge=(t,s)=>{for(const k in s){if(s[k]&&typeof s[k]==='object'&&!Array.isArray(s[k]))"
+        "{t[k]=t[k]||{};merge(t[k],s[k])}else t[k]=s[k]}}; merge(p.settings,%s); await p.saveSettings();"
+        " if(typeof p.refreshAfterSettingsChange==='function') p.refreshAfterSettingsChange();"
+        " return 'OK '+JSON.stringify(Object.fromEntries(Object.keys(%s).map(k=>[k,p.settings[k]])))})()"
+    ) % (json.dumps(plugin_id), payload, payload)
+    return cli_eval(code, vault)
+
+
+def gui_announce(message):
+    """When run by an AI agent (CLAUDE_SESSION_ID set) and a `gui-takeover` helper exists, announce the new
+    window before it appears. Optional; a person running the command gets no banner."""
+    if os.environ.get("CLAUDE_SESSION_ID") and shutil.which("gui-takeover") and not os.environ.get("GUI_TAKEOVER_OFF"):
+        try:
+            subprocess.run(["gui-takeover", "5", message], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def register_vault(path, name):
+    vaults = registered_vaults()
+    host = next((n for n, ps in vaults.items() if len(ps) == 1 and n != name), None)
+    gui_announce(f"Opening {short(path)} as a new Obsidian vault (one new window, no clicks)")
+    # UNDOCUMENTED-API(vault-open-ipc): the main-process IPC the vault switcher's "Open folder as vault"
+    # button sends. Found by reading obsidian-<ver>.asar (ipcMain.on("vault-open",(e,path,create)=>…)).
+    # Breaks as: eval prints an error or `false`, vault never appears in `obsidian vaults`.
+    # Fallback: vault switcher -> Open folder as vault, then re-run `apply`.
+    result = cli_eval("electron.ipcRenderer.sendSync('vault-open', %s, false)" % json.dumps(path), host)
+    for _ in range(10):
+        time.sleep(2)
+        if path in registered_vaults().get(name, set()) and "Vault not found" not in cli("vault", vault=name):
+            return None
+    return f"registration failed (vault-open returned {result!r})"
+
+
+brat_switched_on = [False]
+
+
+def brat_install(vault, repo):
+    """Install a GitHub plugin with BRAT's own addPlugin(), inside the app. Left switched off."""
+    if "obsidian42-brat" not in installed_plugins(vault):
+        cli("plugin:install", "id=obsidian42-brat", vault=vault, timeout=180)
+        if not wait_for_install(vault, "obsidian42-brat"):
+            return "BRAT did not install"
+    if "obsidian42-brat" not in enabled_plugins(vault):
+        cli("plugin:enable", "id=obsidian42-brat", vault=vault)
+        brat_switched_on[0] = True
+        time.sleep(2)
+    # UNDOCUMENTED-API(brat-addplugin): BRAT's internal BetaPlugins.addPlugin(repo, updatePluginFiles,
+    # seeIfUpdatedOnly, reportIfNotUpdated, specifyVersion, forceReinstall, enableAfterInstall). Read from
+    # BRAT 2.2.0 main.js. Breaks as: 'BRAT not loaded', a TypeError, or the plugin never lands.
+    # Fallback: open obsidian://brat?plugin=<owner/repo> and click Add Plugin.
+    code = ("(async()=>{const b=app.plugins.plugins['obsidian42-brat']; if(!b) return 'BRAT not loaded';"
+            " const ok=await b.betaPlugins.addPlugin(%s,false,false,false,'',false,false); return String(ok)})()"
+            % json.dumps(repo))
+    result = cli_eval(code, vault)
+    return None if result.strip() in ("true", "") else f"BRAT addPlugin returned {result!r}"
+
+
+def setup(path, profile, extras, register, roster):
+    manifest = load_manifest()
+    profiles = manifest["profiles"]
+    if profile not in profiles:
+        sys.exit(f"Unknown profile {profile!r}. Profiles: {', '.join(profiles)}")
+    to_enable = list(profiles[profile]["plugins"]) + list(extras)
+    banned = manifest.get("banned", {})
+    for plugin_id in to_enable:
+        if plugin_id in banned:
+            sys.exit(f"REFUSED: {plugin_id} is banned: {banned[plugin_id]['reason'].strip()}")
+        if plugin_id not in manifest["plugins"]:
+            sys.exit(f"{plugin_id} is not in the config. Add it to {short(MANIFEST)} first.")
+    to_install = list(dict.fromkeys(to_enable + ([k for k, v in manifest["plugins"].items()
+                                                  if v.get("roster") and k not in banned] if roster else [])))
+    name = os.path.basename(path)
+    report, handoffs = [], []
+    brat_switched_on[0] = False
+
+    if not obsidian_running():
+        sys.exit("Obsidian is not running. Open it first (agents do not launch or quit it).")
+    if not os.path.isdir(path):
+        sys.exit(f"{short(path)} is not a folder.")
+    vaults = registered_vaults()
+    others = vaults.get(name, set()) - {path}
+    if others:
+        sys.exit(f"REFUSED: vault name {name!r} also points at {', '.join(map(short, others))}; "
+                 "vault=<name> would be ambiguous. Remove one registration in Obsidian's vault switcher.")
+    if path not in vaults.get(name, set()):
+        if not register:
+            sys.exit(f"{short(path)} is not a vault yet. Use `new` (or `apply --register`).")
+        error = register_vault(path, name)
+        if error:
+            sys.exit(f"{error}. Fallback: Obsidian vault switcher -> Open folder as vault.")
+        report.append(f"registered and opened {short(path)} as vault {name!r}")
+
+    banned_on = enabled_plugins(name) & set(banned)
+    if banned_on:
+        sys.exit(f"REFUSED: banned plugin enabled in this vault: {', '.join(banned_on)}. "
+                 "Disable it in Settings -> Community plugins first.")
+
+    if to_install and cli("plugins:restrict", vault=name).strip() == "on":
+        cli("plugins:restrict", "off", vault=name)
+        time.sleep(3)
+        report.append("Restricted mode: off")
+
+    for plugin_id in to_install:
+        p = manifest["plugins"][plugin_id]
+        if plugin_id not in installed_plugins(name):
+            if p.get("install") == "brat":
+                error = brat_install(name, p["repo"])
+            elif p["source"] == "directory":
+                cli("plugin:install", f"id={plugin_id}", vault=name, timeout=180)
+                error = None
+            else:
+                error = f"no sanctioned install route for {p['repo']}"
+            if error or not wait_for_install(name, plugin_id):
+                handoffs.append(f"{plugin_id}: not installed ({error or 'did not land within 90 s'})")
+                continue
+            report.append(f"installed {plugin_id} {installed_plugins(name).get(plugin_id)}")
+        author = plugin_info(name, plugin_id).get("author", "?")
+        if author != p["expected_author"]:
+            handoffs.append(f"{plugin_id}: installed author is {author!r}, manifest expects "
+                            f"{p['expected_author']!r}; switched off, decide by hand")
+            cli("plugin:disable", f"id={plugin_id}", vault=name)
+            continue
+        wanted_on = plugin_id in to_enable
+        was_on = plugin_id in enabled_plugins(name)
+        if p.get("settings"):
+            # The plugin saves its own settings, so it must be loaded: switch on, save, then restore.
+            if not was_on:
+                cli("plugin:enable", f"id={plugin_id}", vault=name)
+                time.sleep(2)
+            report.append(f"settings {plugin_id}: {apply_settings(name, plugin_id, p['settings'])}")
+            if not was_on and not wanted_on:
+                cli("plugin:disable", f"id={plugin_id}", vault=name)
+        if wanted_on and plugin_id not in enabled_plugins(name):
+            cli("plugin:enable", f"id={plugin_id}", vault=name)
+            report.append(f"enabled {plugin_id}")
+    # Never switch off a plugin someone switched on: only BRAT, if this run switched it on.
+
+    if "obsidian42-brat" not in to_enable and brat_switched_on[0]:
+        cli("plugin:disable", "id=obsidian42-brat", vault=name)
+    time.sleep(3)
+    enabled_now = enabled_plugins(name)
+    installed_now = installed_plugins(name)
+    print(f"Vault {short(path)} (profile {profile}{', full roster' if roster else ''})")
+    for line in report:
+        print(f"  done: {line}")
+    print("  ON : " + ", ".join(sorted(enabled_now)))
+    print("  off: " + ", ".join(sorted(set(installed_now) - enabled_now)))
+    for line in handoffs:
+        print(f"  HAND-OFF: {line}")
+    if roster:
+        print("  Toggle plugins in Obsidian: Settings -> Community plugins.")
+    return 1 if handoffs else 0
+
+
+def git_root(folder):
+    result = subprocess.run(["git", "-C", folder, "rev-parse", "--show-toplevel"],
+                            capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else folder
+
+
+def notify(message):
+    subprocess.run(["osascript", "-e", f"display notification {json.dumps(message)} with title \"Obsidian\""],
+                   capture_output=True)
+
+
+def wait_for_cli(seconds=40):
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if obsidian_running() and "Usage" not in cli("version") and cli("version")[:1].isdigit():
+            return True
+        time.sleep(2)
+    return False
+
+
+def cmd_open(args):
+    """Open the vault at the folder's git root (or the folder); create it if it is not a vault yet."""
+    folder = os.path.abspath(os.path.expanduser(args.folder))
+    root = git_root(folder)
+    name = os.path.basename(root)
+    if not obsidian_running():
+        if not args.launch:
+            sys.exit("Obsidian is not running. Open it first, or pass --launch.")
+        subprocess.run(["open", "-a", "Obsidian"])
+        if not wait_for_cli():
+            sys.exit("Obsidian did not answer the CLI within 40 s.")
+    if root in registered_vaults().get(name, set()):
+        # Documented macOS path: Obsidian opens the registered vault that contains a folder it is handed.
+        subprocess.run(["open", "-a", "Obsidian", root])
+        message = f"Opened vault {name}"
+        print(message)
+        if args.notify:
+            notify(message)
+        return 0
+    status = setup(root, args.profile, [], register=True, roster=True)
+    if args.notify:
+        notify(f"Created vault {name}" + (" (see log: hand-offs)" if status else ""))
+    return status
+
+
+def cmd_doctor(_args):
+    """Probe the CLI and each undocumented API without changing anything."""
+    problems = 0
+    def check(label, ok, detail=""):
+        nonlocal problems
+        problems += 0 if ok else 1
+        print(f"  {'ok  ' if ok else 'FAIL'} {label}{(' — ' + detail) if detail else ''}")
+    print(f"obsidian-vault-setup doctor (config {short(MANIFEST)})")
+    check("config readable", os.path.exists(MANIFEST), "" if os.path.exists(MANIFEST) else "run: obsidian-vault-setup init-config")
+    running = obsidian_running()
+    check("Obsidian running", running, "" if running else "start Obsidian, then re-run")
+    if not running:
+        return 1
+    version = cli("version").split()[0] if cli("version") else "?"
+    check("CLI answers", version[:1].isdigit(), f"app {version}")
+    check(f"app version is the verified {VERIFIED_APP_VERSION}", version == VERIFIED_APP_VERSION,
+          "" if version == VERIFIED_APP_VERSION else "re-verify the UNDOCUMENTED-API sites, then bump VERIFIED_APP_VERSION")
+    host = next((n for n, ps in registered_vaults().items() if len(ps) == 1
+                 and "Vault not found" not in cli("vault", vault=n)), None)
+    if not host:
+        check("an open vault to probe from", False, "open any vault")
+        return 1
+    # UNDOCUMENTED-API(vault-open-ipc / vault-remove-ipc): probe that the renderer can reach ipcRenderer and
+    # that the main process still answers the sibling read-only channel 'vault-list'.
+    probe = cli_eval("typeof electron.ipcRenderer.sendSync==='function' && "
+                     "typeof electron.ipcRenderer.sendSync('vault-list')==='object' ? 'ok' : 'missing'", host)
+    check("vault IPC reachable (vault-open / vault-remove)", probe == "ok", probe)
+    # UNDOCUMENTED-API(plugin-settings): the plugin registry object exists.
+    probe = cli_eval("typeof app.plugins.plugins==='object' && typeof app.plugins.enabledPlugins==='object' ? 'ok':'missing'", host)
+    check("app.plugins registry", probe == "ok", probe)
+    check("brat-addplugin", True, "probed at use time (needs BRAT loaded in the target vault)")
+    return 1 if problems else 0
+
+
+def cmd_init_config(args):
+    """Copy config.example.yaml to the config path (never overwrites)."""
+    if os.path.exists(MANIFEST) and not args.force:
+        print(f"Config already exists: {short(MANIFEST)} (use --force to replace it with the example)")
+        return 0
+    os.makedirs(os.path.dirname(MANIFEST), exist_ok=True)
+    shutil.copyfile(EXAMPLE_CONFIG, MANIFEST)
+    print(f"Wrote {short(MANIFEST)} from the example. Edit the roster, profiles and settings (e.g. your name).")
+    return 0
+
+
+def cmd_install_finder_button(_args):
+    """Build ~/Applications/Open in Obsidian.app (a Finder toolbar button) from the bundled AppleScript."""
+    os.makedirs(os.path.dirname(FINDER_APP), exist_ok=True)
+    subprocess.run(["osacompile", "-o", FINDER_APP, FINDER_SCRIPT], check=True)
+    icon = "/Applications/Obsidian.app/Contents/Resources/icon.icns"
+    if os.path.exists(icon):
+        shutil.copyfile(icon, os.path.join(FINDER_APP, "Contents", "Resources", "applet.icns"))
+        os.utime(FINDER_APP)
+    print(f"Built {short(FINDER_APP)}.\n"
+          "One manual step (Finder has no API for its toolbar): hold Command and drag it from\n"
+          "~/Applications into a Finder window's toolbar. Its first click asks to control Finder: click OK.")
+    return 0
+
+
+def cmd_forget(args):
+    """Unregister a vault from Obsidian's vault list (files untouched). Obsidian refuses while it is open."""
+    path = os.path.abspath(os.path.expanduser(args.folder))
+    host = next((n for n, ps in registered_vaults().items() if len(ps) == 1 and path not in ps
+                 and "Vault not found" not in cli("vault", vault=n)), None)
+    # UNDOCUMENTED-API(vault-remove-ipc): ipcMain.on("vault-remove",(e,path)=>…) — what the vault switcher's
+    # "Remove from list" sends. Returns false while the vault has an open window.
+    # Fallback: vault switcher -> ••• -> Remove from list.
+    result = cli_eval("electron.ipcRenderer.sendSync('vault-remove', %s)" % json.dumps(path), host)
+    print(f"forget {short(path)}: {result}" + ("" if result == "true" else " (close its window first)"))
+    return 0 if result == "true" else 1
+
+
+def cmd_apply(args):
+    path = os.path.abspath(os.path.expanduser(args.vault))
+    return setup(path, args.profile, args.extra, args.register, args.roster)
+
+
+def cmd_new(args):
+    path = os.path.abspath(os.path.expanduser(args.folder))
+    return setup(path, args.profile, args.extra, register=True, roster=True)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+    sub.add_parser("scan")
+    sub.add_parser("doctor")
+    sub.add_parser("install-finder-button", help="build ~/Applications/Open in Obsidian.app")
+    ic = sub.add_parser("init-config", help="create the config file from config.example.yaml")
+    ic.add_argument("--force", action="store_true")
+    fg = sub.add_parser("forget", help="unregister a closed vault (files untouched)")
+    fg.add_argument("folder")
+    op = sub.add_parser("open", help="open the vault at the folder's git root, or create it")
+    op.add_argument("folder", nargs="?", default=".")
+    op.add_argument("--profile", default="core-only")
+    op.add_argument("--launch", action="store_true", help="start Obsidian if it is not running (the Finder button and hotkey pass this)")
+    op.add_argument("--notify", action="store_true", help="macOS notification with the result")
+    new = sub.add_parser("new", help="make a folder a vault, install the whole roster, enable the profile's set")
+    new.add_argument("folder", nargs="?", default=".")
+    new.add_argument("--profile", default="core-only")
+    new.add_argument("--extra", nargs="*", default=[])
+    for name in ("plan", "apply"):
+        s = sub.add_parser(name)
+        s.add_argument("vault")
+        s.add_argument("--profile", required=True)
+        s.add_argument("--extra", nargs="*", default=[])
+        if name == "apply":
+            s.add_argument("--register", action="store_true")
+            s.add_argument("--roster", action="store_true", help="also install every roster plugin, switched off")
+    alias = {"obsidian-new-vault": "new", "obsidian-open-vault": "open"}.get(os.path.basename(sys.argv[0]))
+    if alias and (len(sys.argv) < 2 or sys.argv[1] not in ("-h", "--help")):
+        sys.argv.insert(1, alias)   # `obsidian-new-vault [folder]` == `obsidian-vault-setup new [folder]`
+    args = parser.parse_args()
+    sys.exit({"scan": cmd_scan, "doctor": cmd_doctor, "init-config": cmd_init_config, "install-finder-button": cmd_install_finder_button, "forget": cmd_forget, "open": cmd_open, "new": cmd_new, "plan": cmd_plan, "apply": cmd_apply}[args.command](args))
+
+
+if __name__ == "__main__":
+    main()
