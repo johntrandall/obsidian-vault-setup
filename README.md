@@ -108,6 +108,9 @@ Verified app version is pinned in the code as `VERIFIED_APP_VERSION`; `doctor` w
 - **The CLI prints nothing, exit 0, when the working directory is inside a registered vault that is not
   open.** Without `vault=`, it targets the vault containing the cwd. If a parent folder (say `~/dev`) is
   itself registered as a vault, `obsidian help` run anywhere below it is silent. The tool runs the CLI from `/`.
+- **Calls that name no vault are unreliable even from `/`:** they target the active window, and were observed
+  to hang for over a minute and return nothing. The tool sends every vault-agnostic call (`vaults`, `version`,
+  the registration `eval`) through a named vault that is open and answers within 8 s (fixed in v0.1.1).
 - The CLI exits 0 on errors (`Vault not found.`), so the tool reads the text.
 - Plugin ids are not unique: the directory's `bases-kanban` and `show-hidden-files` are different plugins
   from the ones published under those ids earlier. Every install is checked against the config's `expected_author`.

@@ -58,15 +58,47 @@ def short(path):
     return path.replace(HOME, "~", 1)
 
 
-def cli(*args, vault=None, timeout=60):
-    """Run the Obsidian CLI. It exits 0 even on errors, so callers read the text.
+_HOST_VAULT = []   # cached name of an open, responsive vault ([] = not probed yet, [None] = none found)
 
-    Run from "/": without vault=, the CLI targets the registered vault that contains the working
-    directory, and when that vault is not open it prints NOTHING (exit 0). ~/dev is a registered vault,
-    so any cwd under ~/dev silently fails (Verified 2026-10-13)."""
+
+def host_vault():
+    """Name of an open vault that answers the CLI quickly, used for calls that target no vault in particular.
+
+    Without vault=, the CLI targets the registered vault that contains the working directory (and prints
+    NOTHING, exit 0, when that vault is closed: ~/dev is a registered vault, Verified 2026-10-13); from "/"
+    it targets the active window, and such bare calls were observed to hang >60 s and return nothing
+    (2026-10-14, cause not isolated). Routing every global call through a named, probed vault avoids both.
+    Candidates come from obsidian.json (read-only) entries marked open; first one answering in 8 s wins."""
+    if _HOST_VAULT:
+        return _HOST_VAULT[0]
+    try:
+        with open(OBSIDIAN_JSON) as f:
+            entries = list(json.load(f).get("vaults", {}).values())
+    except (OSError, json.JSONDecodeError):
+        entries = []
+    paths = [v["path"] for v in sorted(entries, key=lambda v: -v.get("ts", 0)) if v.get("open")]
+    names = [os.path.basename(p) for p in paths]
+    for name in dict.fromkeys(names):
+        if names.count(name) > 1 and len({p for p in paths if os.path.basename(p) == name}) > 1:
+            continue   # ambiguous vault name
+        if cli("version", vault=name, timeout=8)[:1].isdigit():
+            _HOST_VAULT.append(name)
+            return name
+    _HOST_VAULT.append(None)
+    return None
+
+
+def cli(*args, vault=None, timeout=60):
+    """Run the Obsidian CLI from "/". It exits 0 even on errors, so callers read the text.
+    Pass vault= whenever possible; vault-agnostic callers pass vault=host_vault()."""
     cmd = [CLI] + ([f"vault={vault}"] if vault else []) + list(args)
-    result = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout,
-                            cwd="/")
+    try:
+        result = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                                timeout=timeout, cwd="/")
+    except subprocess.TimeoutExpired:
+        print(f"obsidian-vault-setup: `obsidian {' '.join(cmd[1:])[:80]}` timed out after {timeout}s "
+              "(is Obsidian busy or showing a dialog?)", file=sys.stderr)
+        return ""
     return (result.stdout + result.stderr).strip()
 
 
@@ -89,7 +121,7 @@ def obsidian_running():
 def registered_vaults():
     """name -> set of paths, as the CLI resolves vault=<name>."""
     names = {}
-    for line in cli("vaults", "verbose").splitlines():
+    for line in cli("vaults", "verbose", vault=host_vault(), timeout=20).splitlines():
         if "\t" in line:
             name, path = line.split("\t", 1)
             names.setdefault(name, set()).add(path)
@@ -219,7 +251,7 @@ def gui_announce(message):
 
 def register_vault(path, name):
     vaults = registered_vaults()
-    host = next((n for n, ps in vaults.items() if len(ps) == 1 and n != name), None)
+    host = host_vault()
     gui_announce(f"Opening {short(path)} as a new Obsidian vault (one new window, no clicks)")
     # UNDOCUMENTED-API(vault-open-ipc): the main-process IPC the vault switcher's "Open folder as vault"
     # button sends. Found by reading obsidian-<ver>.asar (ipcMain.on("vault-open",(e,path,create)=>…)).
@@ -368,7 +400,8 @@ def notify(message):
 def wait_for_cli(seconds=40):
     deadline = time.time() + seconds
     while time.time() < deadline:
-        if obsidian_running() and "Usage" not in cli("version") and cli("version")[:1].isdigit():
+        _HOST_VAULT.clear()
+        if obsidian_running() and host_vault():
             return True
         time.sleep(2)
     return False
@@ -412,14 +445,14 @@ def cmd_doctor(_args):
     check("Obsidian running", running, "" if running else "start Obsidian, then re-run")
     if not running:
         return 1
-    version = cli("version").split()[0] if cli("version") else "?"
+    host = host_vault()
+    check("an open vault answers the CLI", bool(host), host or "open any vault in Obsidian")
+    raw = cli("version", vault=host, timeout=15) if host else ""
+    version = raw.split()[0] if raw else "?"
     check("CLI answers", version[:1].isdigit(), f"app {version}")
     check(f"app version is the verified {VERIFIED_APP_VERSION}", version == VERIFIED_APP_VERSION,
           "" if version == VERIFIED_APP_VERSION else "re-verify the UNDOCUMENTED-API sites, then bump VERIFIED_APP_VERSION")
-    host = next((n for n, ps in registered_vaults().items() if len(ps) == 1
-                 and "Vault not found" not in cli("vault", vault=n)), None)
     if not host:
-        check("an open vault to probe from", False, "open any vault")
         return 1
     # UNDOCUMENTED-API(vault-open-ipc / vault-remove-ipc): probe that the renderer can reach ipcRenderer and
     # that the main process still answers the sibling read-only channel 'vault-list'.
@@ -461,8 +494,7 @@ def cmd_install_finder_button(_args):
 def cmd_forget(args):
     """Unregister a vault from Obsidian's vault list (files untouched). Obsidian refuses while it is open."""
     path = os.path.abspath(os.path.expanduser(args.folder))
-    host = next((n for n, ps in registered_vaults().items() if len(ps) == 1 and path not in ps
-                 and "Vault not found" not in cli("vault", vault=n)), None)
+    host = next((n for n in [host_vault()] if n and path not in registered_vaults().get(n, set())), None)
     # UNDOCUMENTED-API(vault-remove-ipc): ipcMain.on("vault-remove",(e,path)=>…) — what the vault switcher's
     # "Remove from list" sends. Returns false while the vault has an open window.
     # Fallback: vault switcher -> ••• -> Remove from list.
