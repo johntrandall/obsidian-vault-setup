@@ -19,6 +19,7 @@ plugin write their own files.
 | You, in Finder | **Open in Obsidian** button in the Finder toolbar | Opens the vault at the window's git repo root (or the folder). If it is not a vault yet, creates it: roster installed, nothing switched on. Starts Obsidian if needed. |
 | You, keyboard | A hotkey, e.g. Hammerspoon (see [Hotkey](#hotkey)) | Same, for the selected folder or the front window. |
 | You or an agent | `obsidian-open-vault [<folder>]` | Same, from a terminal. |
+| You, clicking a link | `obsidian-vault-setup://open?path=<url-encoded absolute path>` | Same, from anything that can open a URL: a terminal status line, a launcher, a note. The Finder button app is the handler. `obsidian-vault-setup url <folder>` prints the link. Paths outside your home folder are refused. |
 | You or an agent | `obsidian-new-vault [<folder>] --profile <p>` | Create a vault (does not look for the git root). |
 | Agent | `obsidian-vault-setup apply <vault> --profile <p> [--roster]` | Bring an existing vault to a profile. Idempotent; never switches off what someone switched on. |
 | Anyone | `obsidian-vault-setup scan` | Read-only: every registered vault and its plugins. |
@@ -73,6 +74,16 @@ and Obsidian running (the tool drives the running app).
 Any launcher can call `obsidian-vault-setup open --launch --notify <folder>`. With Hammerspoon, a module
 that asks Finder for the selected folder and runs that command via `hs.task`, bound with
 `hs.hotkey.bind({"cmd","alt"}, "O", …)`, gives the same behaviour as the toolbar button.
+
+### Clickable link
+
+`install-finder-button` registers the `obsidian-vault-setup://` URL scheme on the button app (it writes
+`CFBundleURLTypes` into the app's Info.plist and runs `lsregister`). A click on
+`obsidian-vault-setup://open?path=%2FUsers%2Fme%2Fdev%2Fproject` then does what the button does for that
+folder: open its vault, or create one. The handler accepts only `open?path=` with an existing directory
+under your home folder, so a crafted link cannot point the tool elsewhere. Unlike `obsidian://open?path=`,
+which Obsidian answers with "Vault not found" for any folder that is not already a registered vault, this
+link works for every project. `obsidian-vault-setup url <folder>` prints it.
 
 
 ## How each step is done

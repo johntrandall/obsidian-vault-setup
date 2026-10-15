@@ -15,7 +15,9 @@ Commands:
   forget <folder>                                        unregister a closed vault (files untouched)
   doctor                                                 probe the CLI and every undocumented API we depend on
   init-config                                            create the config from config.example.yaml
-  install-finder-button                                  build ~/Applications/Open in Obsidian.app
+  install-finder-button                                  build ~/Applications/Open in Obsidian.app, which is also the
+                                                         handler for obsidian-vault-setup://open?path=<encoded path> links
+  url   [<folder>]                                       print that clickable link for a folder
 
 Config (roster, profiles, settings, banned list), first found of:
   $OBSIDIAN_VAULT_SETUP_CONFIG, $XDG_CONFIG_HOME/obsidian-vault-setup/config.yaml (~/.config/...).
@@ -477,17 +479,52 @@ def cmd_init_config(args):
     return 0
 
 
+URL_SCHEME = "obsidian-vault-setup"   # obsidian-vault-setup://open?path=<url-encoded absolute path>
+LSREGISTER = ("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework"
+              "/Support/lsregister")
+
+
+def open_url(folder):
+    """The clickable form of `obsidian-vault-setup open <folder>`, handled by the Finder button app."""
+    import urllib.parse
+    return f"{URL_SCHEME}://open?path=" + urllib.parse.quote(os.path.abspath(folder), safe="")
+
+
 def cmd_install_finder_button(_args):
-    """Build ~/Applications/Open in Obsidian.app (a Finder toolbar button) from the bundled AppleScript."""
+    """Build ~/Applications/Open in Obsidian.app from the bundled AppleScript: a Finder toolbar button
+    that is also the handler for obsidian-vault-setup://open?path=… links."""
     os.makedirs(os.path.dirname(FINDER_APP), exist_ok=True)
     subprocess.run(["osacompile", "-o", FINDER_APP, FINDER_SCRIPT], check=True)
     icon = "/Applications/Obsidian.app/Contents/Resources/icon.icns"
     if os.path.exists(icon):
         shutil.copyfile(icon, os.path.join(FINDER_APP, "Contents", "Resources", "applet.icns"))
         os.utime(FINDER_APP)
-    print(f"Built {short(FINDER_APP)}.\n"
+    # Declare the URL scheme in the bundle's Info.plist (osacompile writes a plain applet plist) and
+    # tell LaunchServices about it, so `open "obsidian-vault-setup://…"` lands in this app.
+    plist = os.path.join(FINDER_APP, "Contents", "Info.plist")
+    pb = ["/usr/libexec/PlistBuddy", "-c"]
+    subprocess.run(pb + ["Delete :CFBundleURLTypes", plist], stderr=subprocess.DEVNULL)
+    for c in ("Add :CFBundleURLTypes array",
+              "Add :CFBundleURLTypes:0 dict",
+              f"Add :CFBundleURLTypes:0:CFBundleURLName string {URL_SCHEME}",
+              "Add :CFBundleURLTypes:0:CFBundleURLSchemes array",
+              f"Add :CFBundleURLTypes:0:CFBundleURLSchemes:0 string {URL_SCHEME}"):
+        subprocess.run(pb + [c, plist], check=True)
+    # osacompile writes no bundle id; LaunchServices keys scheme claims on one, so give it a stable id.
+    if subprocess.run(pb + ["Set :CFBundleIdentifier com.johnrandall.open-in-obsidian", plist],
+                      stderr=subprocess.DEVNULL).returncode:
+        subprocess.run(pb + ["Add :CFBundleIdentifier string com.johnrandall.open-in-obsidian", plist], check=True)
+    if os.path.exists(LSREGISTER):
+        subprocess.run([LSREGISTER, "-f", FINDER_APP], check=False)
+    print(f"Built {short(FINDER_APP)} (also handles {URL_SCHEME}://open?path=… links).\n"
           "One manual step (Finder has no API for its toolbar): hold Command and drag it from\n"
           "~/Applications into a Finder window's toolbar. Its first click asks to control Finder: click OK.")
+    return 0
+
+
+def cmd_url(args):
+    """Print the clickable obsidian-vault-setup:// link for a folder."""
+    print(open_url(os.path.expanduser(args.folder)))
     return 0
 
 
@@ -518,7 +555,9 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("scan")
     sub.add_parser("doctor")
-    sub.add_parser("install-finder-button", help="build ~/Applications/Open in Obsidian.app")
+    sub.add_parser("install-finder-button", help="build ~/Applications/Open in Obsidian.app (also the obsidian-vault-setup:// URL handler)")
+    url = sub.add_parser("url", help="print the clickable obsidian-vault-setup://open?path=… link for a folder")
+    url.add_argument("folder", nargs="?", default=".")
     ic = sub.add_parser("init-config", help="create the config file from config.example.yaml")
     ic.add_argument("--force", action="store_true")
     fg = sub.add_parser("forget", help="unregister a closed vault (files untouched)")
@@ -544,7 +583,7 @@ def main():
     if alias and (len(sys.argv) < 2 or sys.argv[1] not in ("-h", "--help")):
         sys.argv.insert(1, alias)   # `obsidian-new-vault [folder]` == `obsidian-vault-setup new [folder]`
     args = parser.parse_args()
-    sys.exit({"scan": cmd_scan, "doctor": cmd_doctor, "init-config": cmd_init_config, "install-finder-button": cmd_install_finder_button, "forget": cmd_forget, "open": cmd_open, "new": cmd_new, "plan": cmd_plan, "apply": cmd_apply}[args.command](args))
+    sys.exit({"scan": cmd_scan, "doctor": cmd_doctor, "init-config": cmd_init_config, "install-finder-button": cmd_install_finder_button, "url": cmd_url, "forget": cmd_forget, "open": cmd_open, "new": cmd_new, "plan": cmd_plan, "apply": cmd_apply}[args.command](args))
 
 
 if __name__ == "__main__":
