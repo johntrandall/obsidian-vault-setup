@@ -516,6 +516,12 @@ def cmd_install_finder_button(_args):
         subprocess.run(pb + ["Add :CFBundleIdentifier string com.johnrandall.open-in-obsidian", plist], check=True)
     if os.path.exists(LSREGISTER):
         subprocess.run([LSREGISTER, "-f", FINDER_APP], check=False)
+    # osacompile signs the applet ad hoc, so every rebuild changes its code hash and the Automation
+    # grant macOS recorded for the previous build no longer matches: the next click fails with
+    # "Not authorized to send Apple events to Finder (-1743)" instead of prompting. Clearing the
+    # record makes the first click prompt again (2026-10-15).
+    subprocess.run(["tccutil", "reset", "AppleEvents", "com.johnrandall.open-in-obsidian"],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
     print(f"Built {short(FINDER_APP)} (also handles {URL_SCHEME}://open?path=… links).\n"
           "One manual step (Finder has no API for its toolbar): hold Command and drag it from\n"
           "~/Applications into a Finder window's toolbar. Its first click asks to control Finder: click OK.")
