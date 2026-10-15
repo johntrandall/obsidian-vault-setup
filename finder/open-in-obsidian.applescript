@@ -32,19 +32,14 @@ on run
 end run
 
 on open location theURL
-	-- Decode and validate in Python: scheme and host must match, the path must be an existing
-	-- directory under $HOME. Anything else prints nothing and is refused, so a crafted link
-	-- cannot point the tool at an arbitrary folder.
-	set decoder to "import os, sys, urllib.parse as u
-p = u.urlparse(sys.argv[1])
-if p.scheme != 'obsidian-vault-setup' or p.netloc != 'open':
-    sys.exit()
-path = u.parse_qs(p.query).get('path', [''])[0]
-path = os.path.realpath(path) if path else ''
-home = os.path.realpath(os.path.expanduser('~'))
-if path.startswith(home + os.sep) and os.path.isdir(path):
-    print(path)"
-	set targetPath to do shell script "/usr/bin/python3 -c " & quoted form of decoder & " " & quoted form of theURL
+	-- Decode and validate with the tool itself (`url --decode`, tested in tests/): scheme and host
+	-- must match and the path must be an existing directory under $HOME. A refused link prints
+	-- nothing, so a crafted link cannot point the tool at an arbitrary folder.
+	set targetPath to ""
+	try
+		set targetPath to do shell script "export PATH=\"$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin\"; " & ¬
+			"obsidian-vault-setup url --decode " & quoted form of theURL
+	end try
 	if targetPath is "" then
 		display notification "Refused: " & theURL with title "Obsidian"
 		return

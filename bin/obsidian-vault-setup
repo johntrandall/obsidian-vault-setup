@@ -490,6 +490,31 @@ def open_url(folder):
     return f"{URL_SCHEME}://open?path=" + urllib.parse.quote(os.path.abspath(folder), safe="")
 
 
+def decode_open_url(url, home=None):
+    """The folder an obsidian-vault-setup://open?path=… link points at, or None when the link is refused.
+
+    The applet's `on open location` handler calls this (via `url --decode`) before acting, so the rules
+    live in one tested place: scheme and host must match, the path must be an existing directory under
+    the home folder (realpath on both sides, so a symlink cannot escape), and nothing else is honoured.
+    A link can come from any app or web page once the scheme is registered, so it is treated as untrusted.
+    """
+    import urllib.parse
+    try:
+        p = urllib.parse.urlparse(url)
+    except ValueError:
+        return None
+    if p.scheme != URL_SCHEME or p.netloc != "open":
+        return None
+    path = urllib.parse.parse_qs(p.query).get("path", [""])[0]
+    if not path or "\x00" in path:
+        return None
+    path = os.path.realpath(path)
+    home = os.path.realpath(home or HOME)
+    if path.startswith(home + os.sep) and os.path.isdir(path):
+        return path
+    return None
+
+
 def cmd_install_finder_button(_args):
     """Build ~/Applications/Open in Obsidian.app from the bundled AppleScript: a Finder toolbar button
     that is also the handler for obsidian-vault-setup://open?path=… links."""
@@ -529,7 +554,14 @@ def cmd_install_finder_button(_args):
 
 
 def cmd_url(args):
-    """Print the clickable obsidian-vault-setup:// link for a folder."""
+    """Print the clickable obsidian-vault-setup:// link for a folder, or with --decode the folder a link
+    points at (nothing, exit 1, when the link is refused). The applet's URL handler uses --decode."""
+    if args.decode:
+        path = decode_open_url(args.folder)
+        if path is None:
+            return 1
+        print(path)
+        return 0
     print(open_url(os.path.expanduser(args.folder)))
     return 0
 
@@ -563,7 +595,8 @@ def main():
     sub.add_parser("doctor")
     sub.add_parser("install-finder-button", help="build ~/Applications/Open in Obsidian.app (also the obsidian-vault-setup:// URL handler)")
     url = sub.add_parser("url", help="print the clickable obsidian-vault-setup://open?path=… link for a folder")
-    url.add_argument("folder", nargs="?", default=".")
+    url.add_argument("folder", nargs="?", default=".", help="a folder, or with --decode the link")
+    url.add_argument("--decode", action="store_true", help="print the folder an obsidian-vault-setup:// link points at; refused links print nothing and exit 1")
     ic = sub.add_parser("init-config", help="create the config file from config.example.yaml")
     ic.add_argument("--force", action="store_true")
     fg = sub.add_parser("forget", help="unregister a closed vault (files untouched)")

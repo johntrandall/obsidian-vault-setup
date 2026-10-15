@@ -83,7 +83,13 @@ that asks Finder for the selected folder and runs that command via `hs.task`, bo
 folder: open its vault, or create one. The handler accepts only `open?path=` with an existing directory
 under your home folder, so a crafted link cannot point the tool elsewhere. Unlike `obsidian://open?path=`,
 which Obsidian answers with "Vault not found" for any folder that is not already a registered vault, this
-link works for every project. `obsidian-vault-setup url <folder>` prints it.
+link works for every project. `obsidian-vault-setup url <folder>` prints it; `url --decode <link>` prints
+the folder a link resolves to (nothing and exit 1 when refused), which is what the handler calls.
+
+## Tests
+
+`python3 -m pytest tests/` — the link builder and decoder, the `url` CLI, and (on macOS) that
+`install-finder-button` builds an applet declaring the scheme. Nothing in the suite talks to Obsidian.
 
 
 ## How each step is done
