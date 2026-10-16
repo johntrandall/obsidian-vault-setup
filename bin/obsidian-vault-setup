@@ -508,8 +508,15 @@ def decode_open_url(url, home=None):
     path = urllib.parse.parse_qs(p.query).get("path", [""])[0]
     if not path or "\x00" in path:
         return None
+    home_raw = home or HOME
+    # A relative path ("dev/project", or "~/dev/project") is under the home folder: the short
+    # form the link-bridge /vault-setup page forwards, so a status line link stays readable.
+    if path.startswith("~/"):
+        path = path[2:]
+    if not path.startswith("/"):
+        path = os.path.join(home_raw, path)
     path = os.path.realpath(path)
-    home = os.path.realpath(home or HOME)
+    home = os.path.realpath(home_raw)
     if path.startswith(home + os.sep) and os.path.isdir(path):
         return path
     return None

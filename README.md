@@ -84,7 +84,7 @@ folder: open its vault, or create one. The handler accepts only `open?path=` wit
 under your home folder, so a crafted link cannot point the tool elsewhere. Unlike `obsidian://open?path=`,
 which Obsidian answers with "Vault not found" for any folder that is not already a registered vault, this
 link works for every project. `obsidian-vault-setup url <folder>` prints it; `url --decode <link>` prints
-the folder a link resolves to (nothing and exit 1 when refused), which is what the handler calls.
+the folder a link resolves to (nothing and exit 1 when refused), which is what the handler calls. A relative path (`dev/project`, or `~/dev/project`) is taken under your home folder: the short form the link-bridge `/vault-setup` page forwards.
 
 ## Tests
 

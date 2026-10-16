@@ -75,6 +75,12 @@ def test_decode_refuses_malformed_links(tool, home, url):
     assert tool.decode_open_url(url, home=str(home)) is None
 
 
+def test_decode_relative_path_is_under_home(tool, home):
+    assert tool.decode_open_url("obsidian-vault-setup://open?path=project", home=str(home)) == str(home / "project")
+    assert tool.decode_open_url("obsidian-vault-setup://open?path=~%2Fwith%20space", home=str(home)) == str(home / "with space")
+    assert tool.decode_open_url("obsidian-vault-setup://open?path=..%2Felsewhere", home=str(home)) is None
+
+
 def test_decode_refuses_paths_outside_home(tool, home, tmp_path_factory):
     elsewhere = tmp_path_factory.mktemp("elsewhere")
     assert tool.decode_open_url(tool.open_url(str(elsewhere)), home=str(home)) is None
