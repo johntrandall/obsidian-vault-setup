@@ -285,7 +285,7 @@ def core_settings_for(manifest, profile):
     return merged
 
 
-BASE_PRUNE = {"node_modules", "zArchive", "vendor", "Library"}
+BASE_PRUNE = {"node_modules", "zArchive", "vendor", "Library", "templates"}   # a .base under templates/ is a template, not a Base
 
 
 def bookmark_bases_for(manifest, profile):
@@ -322,13 +322,26 @@ def bases_in(vault_path, max_depth=6):
 
 
 def base_title(rel, all_rels):
-    """Bookmark title for a Base: `Base · <stem>` (leading underscore and .base dropped); when two Bases in
-    the vault share a stem, `Base · <parent folder>/<stem>`."""
-    stem = os.path.basename(rel)[:-len(".base")].lstrip("_")
-    stems = [os.path.basename(r)[:-len(".base")].lstrip("_") for r in all_rels]
-    if stems.count(stem) > 1:
-        return f"Base · {os.path.basename(os.path.dirname(rel))}/{stem}"
-    return f"Base · {stem}"
+    """Bookmark title for a Base: `Base · <stem>` (leading underscore and .base dropped). When two Bases in
+    the vault share a stem, the shortest trailing part of the folder path that tells them apart is added:
+    `dev-docs/decisions/_decisions.base` and `plugin/templates/decisions/_decisions.base` become
+    `Base · dev-docs/decisions` and `Base · templates/decisions` (a folder named like the stem stands in for it;
+    otherwise `Base · <folders>/<stem>`). Verified need: watchbill vault, 2026-10-19."""
+    def stem_of(r):
+        return os.path.basename(r)[:-len(".base")].lstrip("_")
+    stem = stem_of(rel)
+    rivals = [r for r in all_rels if r != rel and stem_of(r) == stem]
+    if not rivals:
+        return f"Base · {stem}"
+    parts = os.path.dirname(rel).split("/") if os.path.dirname(rel) else []
+    rival_dirs = [os.path.dirname(r).split("/") if os.path.dirname(r) else [] for r in rivals]
+    n = 1
+    while n <= len(parts) and any(rd[-n:] == parts[-n:] for rd in rival_dirs):
+        n += 1
+    suffix = parts[-n:] if parts else []
+    if suffix and suffix[-1] == stem:
+        return "Base · " + "/".join(suffix)
+    return "Base · " + "/".join(suffix + [stem]) if suffix else f"Base · {stem}"
 
 
 def bookmarked_paths(vault_path):

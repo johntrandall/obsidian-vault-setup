@@ -43,9 +43,24 @@ def test_title_drops_underscore_and_extension(tool):
     assert tool.base_title("events/_events.base", ["events/_events.base"]) == "Base · events"
 
 
-def test_title_disambiguates_duplicate_stems_with_parent_folder(tool):
+def test_title_disambiguates_duplicate_stems_with_the_shortest_distinct_folder_suffix(tool):
     rels = ["a/_decisions.base", "b/_decisions.base"]
     assert tool.base_title("a/_decisions.base", rels) == "Base · a/decisions"
+    # same parent folder name on both sides (the watchbill vault, 2026-10-19): one more folder tells them apart,
+    # and a folder named like the stem stands in for the stem
+    rels = ["dev-docs/decisions/_decisions.base", "plugin/other/decisions/_decisions.base"]
+    assert tool.base_title("dev-docs/decisions/_decisions.base", rels) == "Base · dev-docs/decisions"
+    assert tool.base_title("plugin/other/decisions/_decisions.base", rels) == "Base · other/decisions"
+    rels = ["x/_notes.base", "y/sub/_notes.base"]
+    assert tool.base_title("y/sub/_notes.base", rels) == "Base · sub/notes"
+
+
+def test_bases_under_a_templates_folder_are_not_bases(tool, tmp_path):
+    (tmp_path / "templates" / "decisions").mkdir(parents=True)
+    (tmp_path / "templates" / "decisions" / "_decisions.base").write_text("views: []\n")
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "_real.base").write_text("views: []\n")
+    assert tool.bases_in(str(tmp_path)) == ["real/_real.base"]
 
 
 def test_missing_skips_bookmarks_already_present_including_nested_groups(tool, vault):
