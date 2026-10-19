@@ -11,6 +11,14 @@
 schema_version: 1
 
 # --------------------------------------------------------------------------------------------------
+# always_on: plugins switched ON in every vault this tool sets up, whatever the profile. The one place
+# for a plugin that is really a preference of yours rather than of a kind of vault. Each id must be in
+# `plugins:` below. Default: Window Title, so every window (and the macOS Window menu, the Dock, the
+# task switcher) reads "<vault> · <note>" instead of Obsidian's "<note> - <vault> - Obsidian 1.x".
+# --------------------------------------------------------------------------------------------------
+always_on: [window-title]
+
+# --------------------------------------------------------------------------------------------------
 # core_settings: settings of Obsidian's CORE plugins (Settings -> Core plugins), applied to EVERY vault
 # this tool sets up (`new`, `open`, `apply`). Keys are core plugin ids (`switcher`, `file-explorer`, …)
 # and the option names Obsidian stores in `.obsidian/<id>.json`; Obsidian writes that file itself.
@@ -20,6 +28,13 @@ core_settings:
   switcher:                       # Quick switcher (Cmd+O)
     showAllFileTypes: true        # off by default in Obsidian, which hides .base, .canvas and other
                                   # non-markdown files from Cmd+O; a Base you built should be two keystrokes away
+
+# --------------------------------------------------------------------------------------------------
+# bookmark_bases: bookmark every Obsidian Base (*.base file) in the vault, so each is one click away in
+# the Bookmarks pane. Idempotent (existing bookmarks are kept); applied on `new`, `open` and `apply`, so a
+# Base created later is bookmarked on the next pass. A profile may set its own `bookmark_bases:`.
+# --------------------------------------------------------------------------------------------------
+bookmark_bases: true
 
 # --------------------------------------------------------------------------------------------------
 # profiles: named sets of plugins to switch ON. `obsidian-new-vault --profile <name>`; the default is
@@ -60,6 +75,19 @@ profiles:
 #   used_for          optional: why you have it
 # --------------------------------------------------------------------------------------------------
 plugins:
+  window-title:
+    name: Window Title
+    expected_author: gorky               # manifest.json author (the GitHub account is igorhajduk)
+    repo: igorhajduk/obsidian-window-title
+    source: directory
+    roster: true
+    used_for: Window title as "<vault> · <note>" in every window, pop-outs included; survives renames and tab switches.
+    settings:
+      template: "{{vault}} · {{title}}"  # elements: vault, title, filename, basename, folder, filepath, frontmatter["key"]
+    # This plugin keeps no `settings` + `saveSettings()` pair, so the tool calls its own API instead
+    # (undocumented-api `plugin-settings-hook`): `p` is the loaded plugin, `s` the settings above.
+    settings_save: "p.setTemplate(s.template); p.flushSave(); return 'OK '+JSON.stringify({template: p.template});"
+
   track-changes:
     name: Track Changes
     expected_author: Phil Baum

@@ -19,7 +19,7 @@ Commands:
                                                          handler for obsidian-vault-setup://open?path=<encoded path> links
   url   [<folder>]                                       print that clickable link for a folder
 
-Config (roster, profiles, settings, core_settings, banned list), first found of:
+Config (roster, profiles, always_on, settings, core_settings, banned list), first found of:
   $OBSIDIAN_VAULT_SETUP_CONFIG, $XDG_CONFIG_HOME/obsidian-vault-setup/config.yaml (~/.config/...).
   Start from config.example.yaml: `obsidian-vault-setup init-config`.
 
@@ -28,6 +28,8 @@ UNDOCUMENTED APIs (convention: `undocumented-api-usage` skill). Each call site c
   vault-open-ipc     electron.ipcRenderer.sendSync('vault-open', path, false)  — register + open a folder
   vault-remove-ipc   electron.ipcRenderer.sendSync('vault-remove', path)       — unregister (closed vault)
   plugin-settings    app.plugins.plugins[id].settings + saveSettings()          — plugin's own settings save
+  plugin-settings-hook  a plugin's own save call named in the config (`settings_save`), for plugins
+                                                                             that keep no `settings`/`saveSettings` pair (e.g. Window Title's setTemplate)
   brat-addplugin     BRAT betaPlugins.addPlugin(repo, …)                         — GitHub-only plugin install
   core-plugin-settings  app.internalPlugins.getPluginById(id).instance.options + saveData(options)
                                                                              — a core plugin's settings (e.g. Quick switcher)
@@ -185,11 +187,15 @@ def cmd_scan(_args):
 
 # ----------------------------------------------------------------------------- plan/apply
 
-def resolve(args, manifest):
+def plugins_to_enable(manifest, profile, extras=()):
+    """The plugins a vault of this profile gets switched ON: the config's `always_on` list (every vault,
+    whatever the profile), then the profile's own list, then the run's `--extra` ids. Validated against the
+    banned list and the plugin table; order kept, duplicates dropped."""
     profiles = manifest["profiles"]
-    if args.profile not in profiles:
-        sys.exit(f"Unknown profile {args.profile!r}. Profiles: {', '.join(profiles)}")
-    wanted = list(profiles[args.profile]["plugins"]) + list(args.extra or [])
+    if profile not in profiles:
+        sys.exit(f"Unknown profile {profile!r}. Profiles: {', '.join(profiles)}")
+    wanted = list(dict.fromkeys(list(manifest.get("always_on") or []) + list(profiles[profile]["plugins"])
+                                + list(extras or [])))
     banned = manifest.get("banned", {})
     for plugin_id in wanted:
         if plugin_id in banned:
@@ -197,6 +203,10 @@ def resolve(args, manifest):
         if plugin_id not in manifest["plugins"]:
             sys.exit(f"{plugin_id} is not in the config. Add it to {short(MANIFEST)} first.")
     return wanted
+
+
+def resolve(args, manifest):
+    return plugins_to_enable(manifest, args.profile, args.extra or [])
 
 
 def cmd_plan(args):
@@ -211,9 +221,12 @@ def cmd_plan(args):
         p = manifest["plugins"][plugin_id]
         how = ("plugin:install id=%s enable" % plugin_id) if p["source"] == "directory" \
             else f"HAND-OFF: not the directory plugin; install {p['repo']} (see skill section 5)"
-        print(f"  {plugin_id:30} {how}; expect author {p['expected_author']}")
+        always = " (always_on)" if plugin_id in (manifest.get("always_on") or []) else ""
+        print(f"  {plugin_id:30} {how}; expect author {p['expected_author']}{always}")
         for key, value in (p.get("settings") or {}).items():
             print(f"      setting {key} = {value!r}")
+        if p.get("settings_save"):
+            print(f"      saved by the plugin's own call: {p['settings_save'].strip()}")
     for plugin_id, settings in core_settings_for(manifest, args.profile).items():
         for key, value in settings.items():
             print(f"  core plugin {plugin_id:19} setting {key} = {value!r}")
@@ -228,21 +241,34 @@ def wait_for_install(vault, plugin_id, seconds=90):
     return False
 
 
-def apply_settings(vault, plugin_id, settings):
+def settings_code(plugin_id, settings, save_hook=None):
+    """The JavaScript `obsidian eval` runs to save a plugin's settings, built here so tests can read it.
+    Default: merge into the plugin's `settings` and call its `saveSettings()`. With `save_hook` (the config's
+    `settings_save`), that snippet runs instead with `p` (the loaded plugin) and `s` (the settings) in scope
+    and must `return` a string starting with 'OK ' on success."""
+    payload = json.dumps(settings)
+    head = "(async()=>{const p=app.plugins.plugins[%s]; if(!p) return 'NOT LOADED';" % json.dumps(plugin_id)
+    if save_hook:
+        # UNDOCUMENTED-API(plugin-settings-hook): the plugin's own save call, named per plugin in the config
+        # (`settings_save`). For plugins that keep no `settings` + `saveSettings()` pair, e.g. Window Title 0.1.1:
+        # `p.setTemplate(s.template); p.flushSave()` writes its data.json. Breaks as: TypeError (method renamed),
+        # or the hook returns something other than 'OK …'. Fallback: Settings -> Community plugins -> <plugin>.
+        return head + " const s=%s; %s })()" % (payload, save_hook.strip())
     # UNDOCUMENTED-API(plugin-settings): `app.plugins.plugins[id]` and the plugin's own `settings` object +
     # `saveSettings()`. Conventional for Obsidian plugins (sample-plugin pattern), not a public contract.
     # Breaks as: 'NOT LOADED' / 'NO saveSettings', or the value reverts after reload.
     # Fallback: the user sets it in Settings -> Community plugins -> <plugin>.
-    payload = json.dumps(settings)
-    code = (
-        "(async()=>{const p=app.plugins.plugins[%s]; if(!p) return 'NOT LOADED';"
+    return head + (
         " if(typeof p.saveSettings!=='function') return 'NO saveSettings';"
         " const merge=(t,s)=>{for(const k in s){if(s[k]&&typeof s[k]==='object'&&!Array.isArray(s[k]))"
         "{t[k]=t[k]||{};merge(t[k],s[k])}else t[k]=s[k]}}; merge(p.settings,%s); await p.saveSettings();"
         " if(typeof p.refreshAfterSettingsChange==='function') p.refreshAfterSettingsChange();"
         " return 'OK '+JSON.stringify(Object.fromEntries(Object.keys(%s).map(k=>[k,p.settings[k]])))})()"
-    ) % (json.dumps(plugin_id), payload, payload)
-    return cli_eval(code, vault)
+    ) % (payload, payload)
+
+
+def apply_settings(vault, plugin_id, settings, save_hook=None):
+    return cli_eval(settings_code(plugin_id, settings, save_hook), vault)
 
 
 def core_settings_for(manifest, profile):
@@ -327,16 +353,8 @@ def brat_install(vault, repo):
 
 def setup(path, profile, extras, register, roster):
     manifest = load_manifest()
-    profiles = manifest["profiles"]
-    if profile not in profiles:
-        sys.exit(f"Unknown profile {profile!r}. Profiles: {', '.join(profiles)}")
-    to_enable = list(profiles[profile]["plugins"]) + list(extras)
+    to_enable = plugins_to_enable(manifest, profile, extras)
     banned = manifest.get("banned", {})
-    for plugin_id in to_enable:
-        if plugin_id in banned:
-            sys.exit(f"REFUSED: {plugin_id} is banned: {banned[plugin_id]['reason'].strip()}")
-        if plugin_id not in manifest["plugins"]:
-            sys.exit(f"{plugin_id} is not in the config. Add it to {short(MANIFEST)} first.")
     to_install = list(dict.fromkeys(to_enable + ([k for k, v in manifest["plugins"].items()
                                                   if v.get("roster") and k not in banned] if roster else [])))
     name = os.path.basename(path)
@@ -397,7 +415,8 @@ def setup(path, profile, extras, register, roster):
             if not was_on:
                 cli("plugin:enable", f"id={plugin_id}", vault=name)
                 time.sleep(2)
-            report.append(f"settings {plugin_id}: {apply_settings(name, plugin_id, p['settings'])}")
+            result = apply_settings(name, plugin_id, p["settings"], p.get("settings_save"))
+            (report if result.startswith("OK") else handoffs).append(f"settings {plugin_id}: {result}")
             if not was_on and not wanted_on:
                 cli("plugin:disable", f"id={plugin_id}", vault=name)
         if wanted_on and plugin_id not in enabled_plugins(name):

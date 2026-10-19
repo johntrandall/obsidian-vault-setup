@@ -47,6 +47,18 @@ Then set your name in `track-changes.settings.localAuthorName`, prune the roster
 plugin id and the option name Obsidian stores in `.obsidian/<id>.json`. The example switches on the Quick
 switcher's "Show all file types", which Obsidian ships off and which hides `.base` files from Cmd+O. A profile
 may add its own `core_settings` block.
+
+`always_on` lists community plugins switched on in every vault, whatever its profile: preferences of yours
+rather than of a kind of vault. The example puts **Window Title** there, so every window reads
+`<vault> · <note>` instead of Obsidian's `<note> - <vault> - Obsidian 1.x` (what the macOS Window menu, the
+Dock and the task switcher show). `apply` adds it to an existing vault; `new` and `open` include it.
+
+A plugin's `settings:` are saved through its own `settings` object + `saveSettings()` (the sample-plugin
+convention). A plugin that keeps no such pair names its own save call in `settings_save`, a JavaScript snippet
+run inside the app with `p` (the loaded plugin) and `s` (the settings) in scope, returning `'OK …'`; Window
+Title's is `p.setTemplate(s.template); p.flushSave()`.
+
+`bookmark_bases: true` bookmarks every Obsidian Base (`*.base`) in the vault through `obsidian bookmark`, titled `Base · <name>`, keeping bookmarks that already exist; it runs on every `new`, `open` and `apply`, so a Base created later is bookmarked on the next pass. A profile may set its own `bookmark_bases`.
 The config file can be a symlink, e.g. into a repo where you keep it under version control.
 
 ## Install
@@ -93,8 +105,9 @@ the folder a link resolves to (nothing and exit 1 when refused), which is what t
 
 ## Tests
 
-`python3 -m pytest tests/` — the link builder and decoder, the `url` CLI, and (on macOS) that
-`install-finder-button` builds an applet declaring the scheme. Nothing in the suite talks to Obsidian.
+`python3 -m pytest tests/` — the link builder and decoder, the `url` CLI, the `core_settings` merge, the
+`always_on` list and the `settings_save` hook code, and (on macOS) that `install-finder-button` builds an
+applet declaring the scheme. Nothing in the suite talks to Obsidian.
 
 
 ## How each step is done
@@ -107,6 +120,8 @@ the folder a link resolves to (nothing and exit 1 when refused), which is what t
 | Install a plugin | `obsidian plugin:install id=<id>` (no `enable`, returns before the download lands; polled) | Yes |
 | GitHub-only plugin | BRAT `betaPlugins.addPlugin()` via `obsidian eval` (none on the roster today) | **No**: `brat-addplugin` |
 | Plugin settings | the plugin's own `settings` + `saveSettings()` via `obsidian eval` | **No**: `plugin-settings` |
+| Plugin settings, plugin without `saveSettings` | the save call the config names in `settings_save` (Window Title: `setTemplate` + `flushSave`) via `obsidian eval` | **No**: `plugin-settings-hook` |
+| Bookmark the vault's Bases | `obsidian bookmark file=<path>.base title="Base · <name>"` for each `*.base` (text contains `views:`) not already in `.obsidian/bookmarks.json` (read only) | Yes |
 | Core-plugin settings | `app.internalPlugins.getPluginById(id).instance.options` + `saveData(options)` via `obsidian eval` | **No**: `core-plugin-settings` |
 | Enable / disable | `obsidian plugin:enable` / `plugin:disable` | Yes |
 | Identity check | `obsidian plugin id=<id>` → author must match the manifest | Yes |
@@ -122,6 +137,7 @@ call site in `bin/obsidian-vault-setup`; `doctor` probes all but `brat-addplugin
 | `vault-open-ipc` | `ipcRenderer.sendSync('vault-open', path, false)` → `true` | `obsidian-1.14.4.asar`, main process `ipcMain.on("vault-open", …)`; the vault switcher's "Open folder as vault" sends it | app 1.14.4, 2026-10-13 | eval error, or not `true`; vault missing from `obsidian vaults` | Vault switcher → Open folder as vault, then `apply` | Verified (5 vaults) |
 | `vault-remove-ipc` | `ipcRenderer.sendSync('vault-remove', path)` → `true` | same file, `ipcMain.on("vault-remove", …)`; refuses (`false`) while the vault is open | app 1.14.4, 2026-10-13 | `false` while open; error | Vault switcher → ••• → Remove from list | Verified (4 vaults) |
 | `plugin-settings` | `app.plugins.plugins[id].settings` + `await saveSettings()` | Obsidian sample-plugin convention, not a public contract | Track Changes 2.2.0, 2026-10-13 | `NOT LOADED` / `NO saveSettings`; value reverts after reload | Settings → Community plugins → plugin | Verified (survives disable/enable) |
+| `plugin-settings-hook` | the per-plugin snippet in the config's `settings_save`, run with `p` = loaded plugin, `s` = settings; Window Title 0.1.1: `p.setTemplate(s.template); p.flushSave()` → `data.json` `{version:1, template}` | the plugin's own `main.ts` (`setTemplate`, `flushSave`, `SettingsStore`) | Window Title 0.1.1 on app 1.14.4, 2026-10-19 | TypeError (method renamed) or a return that is not `OK …` → HAND-OFF line | Settings → Community plugins → Window Title → Template | Verified (template saved, title updated in both windows) |
 | `core-plugin-settings` | `app.internalPlugins.getPluginById(id)`: `instance.options` + `await saveData(options)` → `.obsidian/<id>.json` | `obsidian-1.14.4.asar`, `InternalPlugin.saveData(e){ vault.writeConfigJson(this.instance.id, e) }`; what the Settings pane calls | app 1.14.4, 2026-10-19 | `NO CORE PLUGIN` / `NO saveData`; `.obsidian/<id>.json` unchanged (note: `saveData()` without the argument writes nothing) | Settings → the core plugin's pane | Verified (`switcher.showAllFileTypes`, 5 vaults) |
 | `brat-addplugin` | `betaPlugins.addPlugin(repo, false, false, false, '', false, enableAfterInstall)` | BRAT 2.2.0 `main.js` | BRAT 2.2.0, 2026-10-13 | `BRAT not loaded`, TypeError, plugin never lands | `obsidian://brat?plugin=<owner/repo>`, click Add Plugin | Verified (1 plugin) |
 
