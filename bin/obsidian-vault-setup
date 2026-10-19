@@ -108,9 +108,17 @@ def cli(*args, vault=None, timeout=60):
     return (result.stdout + result.stderr).strip()
 
 
-def cli_eval(code, vault):
-    out = cli("eval", f"code={code}", vault=vault)
-    return out[3:].strip() if out.startswith("=> ") else out
+def cli_eval(code, vault, retries=2):
+    """`obsidian eval`, with the CLI's `=> ` prefix stripped. The CLI intermittently answers an EMPTY line to
+    eval (observed 2026-10-19: 2 of 6 probes on one vault, 1 of 6 on another, while the value had in fact
+    been set), so an empty reply is retried after a second, up to `retries` times, before it is returned
+    and a caller files it as a hand-off."""
+    for attempt in range(retries + 1):
+        out = cli("eval", f"code={code}", vault=vault)
+        if out or attempt == retries:
+            return out[3:].strip() if out.startswith("=> ") else out
+        time.sleep(1)
+    return ""
 
 
 def load_manifest():
