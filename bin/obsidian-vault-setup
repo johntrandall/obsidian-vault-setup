@@ -19,7 +19,7 @@ Commands:
                                                          handler for obsidian-vault-setup://open?path=<encoded path> links
   url   [<folder>]                                       print that clickable link for a folder
 
-Config (roster, profiles, always_on, settings, core_settings, banned list), first found of:
+Config (roster, profiles, always_on, settings, core_settings, bookmark_bases, banned list), first found of:
   $OBSIDIAN_VAULT_SETUP_CONFIG, $XDG_CONFIG_HOME/obsidian-vault-setup/config.yaml (~/.config/...).
   Start from config.example.yaml: `obsidian-vault-setup init-config`.
 
@@ -230,6 +230,9 @@ def cmd_plan(args):
     for plugin_id, settings in core_settings_for(manifest, args.profile).items():
         for key, value in settings.items():
             print(f"  core plugin {plugin_id:19} setting {key} = {value!r}")
+    if bookmark_bases_for(manifest, args.profile):
+        missing = missing_base_bookmarks(path) if os.path.isdir(path) else []
+        print(f"  bookmark Bases: {', '.join(rel for rel, _ in missing) if missing else 'none missing'}")
 
 
 def wait_for_install(vault, plugin_id, seconds=90):
@@ -280,6 +283,86 @@ def core_settings_for(manifest, profile):
         for plugin_id, settings in block.items():
             merged.setdefault(plugin_id, {}).update(settings or {})
     return merged
+
+
+BASE_PRUNE = {"node_modules", "zArchive", "vendor", "Library"}
+
+
+def bookmark_bases_for(manifest, profile):
+    """True when this vault's Bases (*.base files) are to be bookmarked: the top-level `bookmark_bases`
+    (default false), overridden by the profile's own `bookmark_bases` when present."""
+    value = manifest.get("bookmark_bases", False)
+    prof = (manifest["profiles"].get(profile) or {})
+    if "bookmark_bases" in prof:
+        value = prof["bookmark_bases"]
+    return bool(value)
+
+
+def bases_in(vault_path, max_depth=6):
+    """Vault-relative paths of every Obsidian Base under the vault: a `*.base` file whose first 4 KB
+    contain `views:` (a Dockerfile.base is not a Base). Dot-folders and BASE_PRUNE folders are skipped.
+    Sorted by path. Reads only; nothing under .obsidian/ is touched."""
+    found = []
+    root_depth = vault_path.rstrip("/").count("/")
+    for dirpath, dirnames, filenames in os.walk(vault_path):
+        if dirpath.count("/") - root_depth >= max_depth:
+            dirnames[:] = []
+        dirnames[:] = sorted(d for d in dirnames if not d.startswith(".") and d not in BASE_PRUNE)
+        for f in filenames:
+            if f.endswith(".base"):
+                full = os.path.join(dirpath, f)
+                try:
+                    with open(full, "r", encoding="utf-8", errors="replace") as fh:
+                        head = fh.read(4096)
+                except OSError:
+                    continue
+                if "views:" in head:
+                    found.append(os.path.relpath(full, vault_path))
+    return sorted(found)
+
+
+def base_title(rel, all_rels):
+    """Bookmark title for a Base: `Base · <stem>` (leading underscore and .base dropped); when two Bases in
+    the vault share a stem, `Base · <parent folder>/<stem>`."""
+    stem = os.path.basename(rel)[:-len(".base")].lstrip("_")
+    stems = [os.path.basename(r)[:-len(".base")].lstrip("_") for r in all_rels]
+    if stems.count(stem) > 1:
+        return f"Base · {os.path.basename(os.path.dirname(rel))}/{stem}"
+    return f"Base · {stem}"
+
+
+def bookmarked_paths(vault_path):
+    """Paths already bookmarked in the vault, read (never written) from .obsidian/bookmarks.json; Obsidian
+    nests bookmark groups, so walk `items` recursively. Missing or unreadable file: empty set."""
+    def walk(items, out):
+        for it in items or []:
+            if isinstance(it, dict):
+                if it.get("type") == "file" and it.get("path"):
+                    out.add(it["path"])
+                walk(it.get("items"), out)
+        return out
+    try:
+        with open(os.path.join(vault_path, ".obsidian", "bookmarks.json"), encoding="utf-8") as f:
+            return walk(json.load(f).get("items"), set())
+    except (OSError, ValueError):
+        return set()
+
+
+def missing_base_bookmarks(vault_path):
+    """[(rel, title)] for every Base in the vault that has no bookmark yet."""
+    rels = bases_in(vault_path)
+    have = bookmarked_paths(vault_path)
+    return [(rel, base_title(rel, rels)) for rel in rels if rel not in have]
+
+
+def bookmark_bases(vault_name, vault_path):
+    """Bookmark every unbookmarked Base through the Obsidian CLI (`bookmark file=<path> title=<t>`, a
+    documented command; Obsidian writes bookmarks.json). Returns report lines."""
+    lines = []
+    for rel, title in missing_base_bookmarks(vault_path):
+        out = cli("bookmark", f"file={rel}", f"title={title}", vault=vault_name).strip()
+        lines.append(f"bookmarked {rel} as {title!r}" if out.startswith("Bookmarked") else f"bookmark {rel}: {out or 'no answer'}")
+    return lines
 
 
 def apply_core_settings(vault, plugin_id, settings):
@@ -426,6 +509,10 @@ def setup(path, profile, extras, register, roster):
     for plugin_id, settings in core_settings_for(manifest, profile).items():
         result = apply_core_settings(name, plugin_id, settings)
         (report if result.startswith("OK") else handoffs).append(f"core settings {plugin_id}: {result}")
+    # Bases (*.base) bookmarked so each is one click away in the Bookmarks pane (John, 2026-10-19).
+    if bookmark_bases_for(manifest, profile):
+        for line in bookmark_bases(name, path):
+            (report if line.startswith("bookmarked") else handoffs).append(line)
     # Never switch off a plugin someone switched on: only BRAT, if this run switched it on.
 
     if "obsidian42-brat" not in to_enable and brat_switched_on[0]:
