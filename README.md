@@ -42,6 +42,11 @@ obsidian-vault-setup init-config     # copies the example into place; never over
 ```
 
 Then set your name in `track-changes.settings.localAuthorName`, prune the roster, and add profiles.
+
+`core_settings` holds settings of Obsidian's own core plugins that every vault should get, keyed by core
+plugin id and the option name Obsidian stores in `.obsidian/<id>.json`. The example switches on the Quick
+switcher's "Show all file types", which Obsidian ships off and which hides `.base` files from Cmd+O. A profile
+may add its own `core_settings` block.
 The config file can be a symlink, e.g. into a repo where you keep it under version control.
 
 ## Install
@@ -102,6 +107,7 @@ the folder a link resolves to (nothing and exit 1 when refused), which is what t
 | Install a plugin | `obsidian plugin:install id=<id>` (no `enable`, returns before the download lands; polled) | Yes |
 | GitHub-only plugin | BRAT `betaPlugins.addPlugin()` via `obsidian eval` (none on the roster today) | **No**: `brat-addplugin` |
 | Plugin settings | the plugin's own `settings` + `saveSettings()` via `obsidian eval` | **No**: `plugin-settings` |
+| Core-plugin settings | `app.internalPlugins.getPluginById(id).instance.options` + `saveData(options)` via `obsidian eval` | **No**: `core-plugin-settings` |
 | Enable / disable | `obsidian plugin:enable` / `plugin:disable` | Yes |
 | Identity check | `obsidian plugin id=<id>` → author must match the manifest | Yes |
 | Unregister | `electron.ipcRenderer.sendSync('vault-remove', path)` via `obsidian eval` | **No**: `vault-remove-ipc` |
@@ -109,13 +115,14 @@ the folder a link resolves to (nothing and exit 1 when refused), which is what t
 ## Undocumented APIs
 
 Convention: `undocumented-api-usage` skill. Each id below has a `UNDOCUMENTED-API(<id>)` comment at its
-call site in `bin/obsidian-vault-setup`; `doctor` probes the first three without changing anything.
+call site in `bin/obsidian-vault-setup`; `doctor` probes all but `brat-addplugin` without changing anything.
 
 | Id | Call | Found in | Verified on | Breaks as | Fallback | Confidence |
 |---|---|---|---|---|---|---|
 | `vault-open-ipc` | `ipcRenderer.sendSync('vault-open', path, false)` → `true` | `obsidian-1.14.4.asar`, main process `ipcMain.on("vault-open", …)`; the vault switcher's "Open folder as vault" sends it | app 1.14.4, 2026-10-13 | eval error, or not `true`; vault missing from `obsidian vaults` | Vault switcher → Open folder as vault, then `apply` | Verified (5 vaults) |
 | `vault-remove-ipc` | `ipcRenderer.sendSync('vault-remove', path)` → `true` | same file, `ipcMain.on("vault-remove", …)`; refuses (`false`) while the vault is open | app 1.14.4, 2026-10-13 | `false` while open; error | Vault switcher → ••• → Remove from list | Verified (4 vaults) |
 | `plugin-settings` | `app.plugins.plugins[id].settings` + `await saveSettings()` | Obsidian sample-plugin convention, not a public contract | Track Changes 2.2.0, 2026-10-13 | `NOT LOADED` / `NO saveSettings`; value reverts after reload | Settings → Community plugins → plugin | Verified (survives disable/enable) |
+| `core-plugin-settings` | `app.internalPlugins.getPluginById(id)`: `instance.options` + `await saveData(options)` → `.obsidian/<id>.json` | `obsidian-1.14.4.asar`, `InternalPlugin.saveData(e){ vault.writeConfigJson(this.instance.id, e) }`; what the Settings pane calls | app 1.14.4, 2026-10-19 | `NO CORE PLUGIN` / `NO saveData`; `.obsidian/<id>.json` unchanged (note: `saveData()` without the argument writes nothing) | Settings → the core plugin's pane | Verified (`switcher.showAllFileTypes`, 5 vaults) |
 | `brat-addplugin` | `betaPlugins.addPlugin(repo, false, false, false, '', false, enableAfterInstall)` | BRAT 2.2.0 `main.js` | BRAT 2.2.0, 2026-10-13 | `BRAT not loaded`, TypeError, plugin never lands | `obsidian://brat?plugin=<owner/repo>`, click Add Plugin | Verified (1 plugin) |
 
 Verified app version is pinned in the code as `VERIFIED_APP_VERSION`; `doctor` warns when it differs.

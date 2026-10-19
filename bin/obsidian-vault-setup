@@ -19,7 +19,7 @@ Commands:
                                                          handler for obsidian-vault-setup://open?path=<encoded path> links
   url   [<folder>]                                       print that clickable link for a folder
 
-Config (roster, profiles, settings, banned list), first found of:
+Config (roster, profiles, settings, core_settings, banned list), first found of:
   $OBSIDIAN_VAULT_SETUP_CONFIG, $XDG_CONFIG_HOME/obsidian-vault-setup/config.yaml (~/.config/...).
   Start from config.example.yaml: `obsidian-vault-setup init-config`.
 
@@ -29,6 +29,8 @@ UNDOCUMENTED APIs (convention: `undocumented-api-usage` skill). Each call site c
   vault-remove-ipc   electron.ipcRenderer.sendSync('vault-remove', path)       — unregister (closed vault)
   plugin-settings    app.plugins.plugins[id].settings + saveSettings()          — plugin's own settings save
   brat-addplugin     BRAT betaPlugins.addPlugin(repo, …)                         — GitHub-only plugin install
+  core-plugin-settings  app.internalPlugins.getPluginById(id).instance.options + saveData(options)
+                                                                             — a core plugin's settings (e.g. Quick switcher)
 Verified against Obsidian app 1.14.4 (installer 1.12.4) and BRAT 2.2.0, 2026-10-13.
 """
 import argparse
@@ -212,6 +214,9 @@ def cmd_plan(args):
         print(f"  {plugin_id:30} {how}; expect author {p['expected_author']}")
         for key, value in (p.get("settings") or {}).items():
             print(f"      setting {key} = {value!r}")
+    for plugin_id, settings in core_settings_for(manifest, args.profile).items():
+        for key, value in settings.items():
+            print(f"  core plugin {plugin_id:19} setting {key} = {value!r}")
 
 
 def wait_for_install(vault, plugin_id, seconds=90):
@@ -237,6 +242,35 @@ def apply_settings(vault, plugin_id, settings):
         " if(typeof p.refreshAfterSettingsChange==='function') p.refreshAfterSettingsChange();"
         " return 'OK '+JSON.stringify(Object.fromEntries(Object.keys(%s).map(k=>[k,p.settings[k]])))})()"
     ) % (json.dumps(plugin_id), payload, payload)
+    return cli_eval(code, vault)
+
+
+def core_settings_for(manifest, profile):
+    """Settings for Obsidian CORE plugins (Settings -> Core plugins), keyed by core plugin id (`switcher`,
+    `file-explorer`, …). The top-level `core_settings` block applies to every vault the tool sets up; a
+    profile's own `core_settings` block adds to or overrides it key by key. Returns {plugin_id: {key: value}}."""
+    merged = {}
+    for block in (manifest.get("core_settings") or {}, (manifest["profiles"].get(profile) or {}).get("core_settings") or {}):
+        for plugin_id, settings in block.items():
+            merged.setdefault(plugin_id, {}).update(settings or {})
+    return merged
+
+
+def apply_core_settings(vault, plugin_id, settings):
+    # UNDOCUMENTED-API(core-plugin-settings): `app.internalPlugins.getPluginById(id)` returns the core plugin;
+    # its `instance.options` is the settings object the Settings pane edits, and `saveData(options)` is what
+    # the pane calls to persist it (vault.writeConfigJson(id, options) -> `.obsidian/<id>.json`, written by
+    # Obsidian). `saveData()` with NO argument writes nothing. Works whether or not the core plugin is
+    # enabled. Verified app 1.14.4, 2026-10-19, `switcher.showAllFileTypes` on five vaults.
+    # Breaks as: 'NO CORE PLUGIN <id>' / 'NO saveData', or `.obsidian/<id>.json` unchanged after the call.
+    # Fallback: the user flips it in Settings -> <core plugin>.
+    payload = json.dumps(settings)
+    code = (
+        "(async()=>{const p=app.internalPlugins.getPluginById(%s); if(!p) return 'NO CORE PLUGIN '+%s;"
+        " if(typeof p.saveData!=='function'||!p.instance||typeof p.instance.options!=='object') return 'NO saveData';"
+        " Object.assign(p.instance.options,%s); await p.saveData(p.instance.options);"
+        " return 'OK '+JSON.stringify(Object.fromEntries(Object.keys(%s).map(k=>[k,p.instance.options[k]])))})()"
+    ) % (json.dumps(plugin_id), json.dumps(plugin_id), payload, payload)
     return cli_eval(code, vault)
 
 
@@ -369,6 +403,10 @@ def setup(path, profile, extras, register, roster):
         if wanted_on and plugin_id not in enabled_plugins(name):
             cli("plugin:enable", f"id={plugin_id}", vault=name)
             report.append(f"enabled {plugin_id}")
+    # Core-plugin settings (every vault, plus the profile's own): Obsidian writes `.obsidian/<id>.json` itself.
+    for plugin_id, settings in core_settings_for(manifest, profile).items():
+        result = apply_core_settings(name, plugin_id, settings)
+        (report if result.startswith("OK") else handoffs).append(f"core settings {plugin_id}: {result}")
     # Never switch off a plugin someone switched on: only BRAT, if this run switched it on.
 
     if "obsidian42-brat" not in to_enable and brat_switched_on[0]:
@@ -464,6 +502,10 @@ def cmd_doctor(_args):
     # UNDOCUMENTED-API(plugin-settings): the plugin registry object exists.
     probe = cli_eval("typeof app.plugins.plugins==='object' && typeof app.plugins.enabledPlugins==='object' ? 'ok':'missing'", host)
     check("app.plugins registry", probe == "ok", probe)
+    # UNDOCUMENTED-API(core-plugin-settings): the core-plugin registry answers and the switcher has saveData.
+    probe = cli_eval("(()=>{const p=app.internalPlugins.getPluginById('switcher');"
+                     " return p&&typeof p.saveData==='function'&&p.instance&&typeof p.instance.options==='object'?'ok':'missing'})()", host)
+    check("core plugin registry + saveData (core-plugin-settings)", probe == "ok", probe)
     check("brat-addplugin", True, "probed at use time (needs BRAT loaded in the target vault)")
     return 1 if problems else 0
 

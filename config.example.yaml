@@ -11,6 +11,17 @@
 schema_version: 1
 
 # --------------------------------------------------------------------------------------------------
+# core_settings: settings of Obsidian's CORE plugins (Settings -> Core plugins), applied to EVERY vault
+# this tool sets up (`new`, `open`, `apply`). Keys are core plugin ids (`switcher`, `file-explorer`, …)
+# and the option names Obsidian stores in `.obsidian/<id>.json`; Obsidian writes that file itself.
+# A profile may carry its own `core_settings:` block, which adds to or overrides these key by key.
+# --------------------------------------------------------------------------------------------------
+core_settings:
+  switcher:                       # Quick switcher (Cmd+O)
+    showAllFileTypes: true        # off by default in Obsidian, which hides .base, .canvas and other
+                                  # non-markdown files from Cmd+O; a Base you built should be two keystrokes away
+
+# --------------------------------------------------------------------------------------------------
 # profiles: named sets of plugins to switch ON. `obsidian-new-vault --profile <name>`; the default is
 # core-only. A profile may only name plugins listed under `plugins:` below.
 # --------------------------------------------------------------------------------------------------
