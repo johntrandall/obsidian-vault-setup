@@ -148,6 +148,7 @@ Verified app version is pinned in the code as `VERIFIED_APP_VERSION`; `doctor` w
 - **The CLI prints nothing, exit 0, when the working directory is inside a registered vault that is not
   open.** Without `vault=`, it targets the vault containing the cwd. If a parent folder (say `~/dev`) is
   itself registered as a vault, `obsidian help` run anywhere below it is silent. The tool runs the CLI from `/`.
+- **`vault=<name>` is not honoured either (Observed 2026-10-20, app 1.14.4, run from `/`):** `eval`, `plugins:enabled` and `plugin id=` all answered for the frontmost window whatever vault was named. Bring the target to the front first (`open -a Obsidian <folder>`, or the `vault-open` IPC for a closed vault) and confirm `app.vault.getName()` before writing. `plugin id=` also reports the directory's version, not the installed manifest.
 - **Calls that name no vault are unreliable even from `/`:** they target the active window, and were observed
   to hang for over a minute and return nothing. The tool sends every vault-agnostic call (`vaults`, `version`,
   the registration `eval`) through a named vault that is open and answers within 8 s (fixed in v0.1.1).
