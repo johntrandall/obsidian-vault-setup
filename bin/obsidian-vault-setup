@@ -54,7 +54,7 @@ SHARE_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))   # rep
 EXAMPLE_CONFIG = os.path.join(SHARE_DIR, "config.example.yaml")
 FINDER_SCRIPT = os.path.join(SHARE_DIR, "finder", "open-in-obsidian.applescript")
 FINDER_APP = os.path.expanduser("~/Applications/Open in Obsidian.app")
-__version__ = "0.1.10"
+__version__ = "0.1.11"
 VERIFIED_APP_VERSION = "1.14.4"   # the undocumented APIs below were last verified on this app version
 OBSIDIAN_JSON = os.path.expanduser("~/Library/Application Support/obsidian/obsidian.json")
 CLI = shutil.which("obsidian") or "/Applications/Obsidian.app/Contents/MacOS/obsidian"
@@ -114,6 +114,11 @@ def cli_eval(code, vault, retries=2):
     eval (observed 2026-10-19: 2 of 6 probes on one vault, 1 of 6 on another, while the value had in fact
     been set), so an empty reply is retried after a second, up to `retries` times, before it is returned
     and a caller files it as a hand-off."""
+    # `vault=` is not honoured by eval (README gotcha, Observed 2026-10-20): the code runs in the FRONTMOST
+    # window. So every eval first checks the window's vault name and answers 'WRONG VAULT <name>' instead of
+    # writing into whatever window the person switched to; callers file that as a hand-off.
+    if vault:
+        code = "(app.vault.getName()!==%s ? 'WRONG VAULT '+app.vault.getName() : (%s))" % (json.dumps(vault), code)
     for attempt in range(retries + 1):
         out = cli("eval", f"code={code}", vault=vault)
         if out or attempt == retries:
@@ -518,8 +523,22 @@ def register_vault(path, name):
 brat_switched_on = [False]
 
 
-def brat_install(vault, repo):
-    """Install a GitHub plugin with BRAT's own addPlugin(), inside the app. Left switched off."""
+def brat_registered(vault_path, repo):
+    """True when BRAT's own list in this vault names `repo` (read, never written, from
+    .obsidian/plugins/obsidian42-brat/data.json). A plugin marked `install: brat` whose id is already in the vault
+    but whose repo BRAT does not know came from the community directory (or by hand), not from the fork."""
+    try:
+        with open(os.path.join(vault_path, ".obsidian", "plugins", "obsidian42-brat", "data.json"), encoding="utf-8") as f:
+            return repo in (json.load(f).get("pluginList") or [])
+    except (OSError, ValueError):
+        return False
+
+
+def brat_install(vault, repo, plugin_id=None, reinstall=False):
+    """Install a GitHub plugin with BRAT's own addPlugin(), inside the app. Left switched off. With
+    `reinstall`, the plugin id is already in the vault from somewhere else (the community directory): BRAT
+    replaces its files and the call waits for the installed manifest version to change."""
+    before = installed_plugins(vault).get(plugin_id) if plugin_id else None
     if "obsidian42-brat" not in installed_plugins(vault):
         cli("plugin:install", "id=obsidian42-brat", vault=vault, timeout=180)
         if not wait_for_install(vault, "obsidian42-brat"):
@@ -533,10 +552,19 @@ def brat_install(vault, repo):
     # BRAT 2.2.0 main.js. Breaks as: 'BRAT not loaded', a TypeError, or the plugin never lands.
     # Fallback: open obsidian://brat?plugin=<owner/repo> and click Add Plugin.
     code = ("(async()=>{const b=app.plugins.plugins['obsidian42-brat']; if(!b) return 'BRAT not loaded';"
-            " const ok=await b.betaPlugins.addPlugin(%s,false,false,false,'',false,false); return String(ok)})()"
-            % json.dumps(repo))
+            " const ok=await b.betaPlugins.addPlugin(%s,false,false,false,'',%s,false); return String(ok)})()"
+            % (json.dumps(repo), "true" if reinstall else "false"))
     result = cli_eval(code, vault)
-    return None if result.strip() in ("true", "") else f"BRAT addPlugin returned {result!r}"
+    if result.strip() not in ("true", ""):
+        return f"BRAT addPlugin returned {result!r}"
+    if reinstall and plugin_id:
+        deadline = time.time() + 90
+        while time.time() < deadline:
+            if installed_plugins(vault).get(plugin_id) != before:
+                return None
+            time.sleep(3)
+        return f"BRAT did not replace {plugin_id} {before} within 90 s"
+    return None
 
 
 def setup(path, profile, extras, register, roster):
@@ -579,6 +607,24 @@ def setup(path, profile, extras, register, roster):
 
     for plugin_id in to_install:
         p = manifest["plugins"][plugin_id]
+        reloaded = False
+        if p.get("install") == "brat" and plugin_id in installed_plugins(name) and not brat_registered(path, p["repo"]):
+            # The id is in the vault but not from BRAT: the community-directory build (or an old copy) is
+            # installed where the config wants the GitHub build (John, 2026-10-26: Track Changes must be his
+            # fork). BRAT replaces the files; a loaded plugin keeps running the old build until it is reloaded.
+            was_loaded = plugin_id in enabled_plugins(name)
+            error = brat_install(name, p["repo"], plugin_id=plugin_id, reinstall=True)
+            if error:
+                handoffs.append(f"{plugin_id}: not replaced from {p['repo']} ({error})")
+                continue
+            if was_loaded:
+                cli("plugin:disable", f"id={plugin_id}", vault=name)
+                time.sleep(1)
+                cli("plugin:enable", f"id={plugin_id}", vault=name)
+                time.sleep(2)
+                reloaded = True
+            report.append(f"replaced {plugin_id} with {p['repo']} {installed_plugins(name).get(plugin_id)}"
+                          + (" and reloaded it" if was_loaded else ""))
         if plugin_id not in installed_plugins(name):
             if p.get("install") == "brat":
                 error = brat_install(name, p["repo"])

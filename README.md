@@ -132,7 +132,7 @@ readable, or replace the symlink with a real (ignored) directory.
 | Open an existing vault | `open -a Obsidian <folder>` (Obsidian opens the registered vault containing it) | macOS standard |
 | Restricted mode off | `obsidian plugins:restrict off` | Yes |
 | Install a plugin | `obsidian plugin:install id=<id>` (no `enable`, returns before the download lands; polled) | Yes |
-| GitHub-only plugin | BRAT `betaPlugins.addPlugin()` via `obsidian eval` (none on the roster today) | **No**: `brat-addplugin` |
+| GitHub-only plugin (`install: brat`) | BRAT `betaPlugins.addPlugin()` via `obsidian eval`; a copy of the same id that BRAT does not list (the community-directory build) is replaced (`forceReinstall`) and, if loaded, reloaded with `plugin:disable` + `plugin:enable`, since a loaded plugin keeps running the old build until then | **No**: `brat-addplugin` |
 | Plugin settings | the plugin's own `settings` + `saveSettings()` via `obsidian eval` | **No**: `plugin-settings` |
 | Plugin settings, plugin without `saveSettings` | the save call the config names in `settings_save` (Window Title: `setTemplate` + `flushSave`) via `obsidian eval` | **No**: `plugin-settings-hook` |
 | Bookmark the vault's Bases | `obsidian bookmark file=<path>.base title="Base · <name>"` for each `*.base` (text contains `views:`) not already in `.obsidian/bookmarks.json` (read only) | Yes |
@@ -155,7 +155,7 @@ call site in `bin/obsidian-vault-setup`; `doctor` probes all but `brat-addplugin
 | `plugin-settings-hook` | the per-plugin snippet in the config's `settings_save`, run with `p` = loaded plugin, `s` = settings; Window Title 0.1.1: `p.setTemplate(s.template); p.flushSave()` → `data.json` `{version:1, template}` | the plugin's own `main.ts` (`setTemplate`, `flushSave`, `SettingsStore`) | Window Title 0.1.1 on app 1.14.4, 2026-10-19 | TypeError (method renamed) or a return that is not `OK …` → HAND-OFF line | Settings → Community plugins → Window Title → Template | Verified (template saved, title updated in both windows) |
 | `core-plugin-settings` | `app.internalPlugins.getPluginById(id)`: `instance.options` + `await saveData(options)` → `.obsidian/<id>.json` | `obsidian-1.14.4.asar`, `InternalPlugin.saveData(e){ vault.writeConfigJson(this.instance.id, e) }`; what the Settings pane calls | app 1.14.4, 2026-10-19 | `NO CORE PLUGIN` / `NO saveData`; `.obsidian/<id>.json` unchanged (note: `saveData()` without the argument writes nothing) | Settings → the core plugin's pane | Verified (`switcher.showAllFileTypes`, 5 vaults) |
 | `excluded-files` | `app.vault.getConfig('userIgnoreFilters')` (array or null) + `app.vault.setConfig('userIgnoreFilters', list)` → `.obsidian/app.json`, fires `config-changed`, `app.metadataCache.userIgnoreFilters` follows | `obsidian-1.14.4.asar`: what the Excluded files dialog (Settings → Files and links) saves | app 1.14.4, 2026-10-26 | `NO setConfig`; `.obsidian/app.json` without `userIgnoreFilters`; `isUserIgnored()` false for a listed folder | Settings → Files and links → Excluded files → Manage | Verified (throwaway vault: 7 entries written by Obsidian, cache followed, `isUserIgnored` true at any depth, idempotent re-run added 0) |
-| `brat-addplugin` | `betaPlugins.addPlugin(repo, false, false, false, '', false, enableAfterInstall)` | BRAT 2.2.0 `main.js` | BRAT 2.2.0, 2026-10-13 | `BRAT not loaded`, TypeError, plugin never lands | `obsidian://brat?plugin=<owner/repo>`, click Add Plugin | Verified (1 plugin) |
+| `brat-addplugin` | `betaPlugins.addPlugin(repo, false, false, false, '', forceReinstall, enableAfterInstall)`; `forceReinstall` true when replacing a directory copy | BRAT 2.2.0 `main.js` | BRAT 2.2.0, 2026-10-13; replace + reload on app 1.15.0, 2026-10-26 | `BRAT not loaded`, TypeError, plugin never lands, manifest version unchanged after 90 s | `obsidian://brat?plugin=<owner/repo>`, click Add Plugin | Verified (1 plugin; replacing a directory build Verified 2026-10-26) |
 
 Verified app version is pinned in the code as `VERIFIED_APP_VERSION`; `doctor` warns when it differs.
 
@@ -168,6 +168,7 @@ Verified app version is pinned in the code as `VERIFIED_APP_VERSION`; `doctor` w
 - **Calls that name no vault are unreliable even from `/`:** they target the active window, and were observed
   to hang for over a minute and return nothing. The tool sends every vault-agnostic call (`vaults`, `version`,
   the registration `eval`) through a named vault that is open and answers within 8 s (fixed in v0.1.1).
+- Because `vault=` is not honoured by `eval`, every `eval` the tool sends is wrapped in a check of `app.vault.getName()` and answers `WRONG VAULT <name>` (filed as a hand-off, nothing written) when another window is in front, e.g. because the person switched vaults mid-run (v0.1.11).
 - The CLI exits 0 on errors (`Vault not found.`), so the tool reads the text.
 - Plugin ids are not unique: the directory's `bases-kanban` and `show-hidden-files` are different plugins
   from the ones published under those ids earlier. Every install is checked against the config's `expected_author`.

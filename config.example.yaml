@@ -77,7 +77,9 @@ profiles:
 #   expected_author   checked after install: plugin ids are NOT unique across the ecosystem, and a
 #                     same-id plugin by another author is switched off and reported instead of used
 #   source            directory (installed with `obsidian plugin:install`) | github (needs `install: brat`)
-#   install           optional: brat — install a GitHub-only plugin through the BRAT plugin, with `repo`
+#   install           optional: brat — install a GitHub-only plugin through the BRAT plugin, with `repo`. Also the
+#                     way to run your own fork of a directory plugin under the same id: a copy of that id that
+#                     BRAT does not list is replaced with the fork's release and reloaded
 #   repo              owner/repo (required for install: brat; informational otherwise)
 #   roster            true = installed (switched off unless a profile enables it) in every new vault
 #   settings          optional: values merged into the plugin's own settings and saved by the plugin
