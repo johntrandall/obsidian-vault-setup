@@ -11,9 +11,9 @@ Commands:
   new   [<folder>] [--profile p] [--extra id ...]        make a vault: install the whole roster, enable the profile's set
   apply <vault> --profile p [--roster] [--register]      bring an existing vault to a profile (idempotent)
   plan  <vault> --profile p                              dry run
-  scan                                                   read-only: every registered vault's plugins
+  scan                                                   read-only: every registered vault's plugins + pre-flight findings
   forget <folder>                                        unregister a closed vault (files untouched)
-  doctor                                                 probe the CLI and every undocumented API we depend on
+  doctor [<folder>]                                      probe the CLI and every undocumented API; pre-flight a folder
   init-config                                            create the config from config.example.yaml
   install-finder-button                                  build ~/Applications/Open in Obsidian.app, which is also the
                                                          handler for obsidian-vault-setup://open?path=<encoded path> links
@@ -54,6 +54,7 @@ SHARE_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))   # rep
 EXAMPLE_CONFIG = os.path.join(SHARE_DIR, "config.example.yaml")
 FINDER_SCRIPT = os.path.join(SHARE_DIR, "finder", "open-in-obsidian.applescript")
 FINDER_APP = os.path.expanduser("~/Applications/Open in Obsidian.app")
+__version__ = "0.1.10"
 VERIFIED_APP_VERSION = "1.14.4"   # the undocumented APIs below were last verified on this app version
 OBSIDIAN_JSON = os.path.expanduser("~/Library/Application Support/obsidian/obsidian.json")
 CLI = shutil.which("obsidian") or "/Applications/Obsidian.app/Contents/MacOS/obsidian"
@@ -184,9 +185,12 @@ def cmd_scan(_args):
             with open(manifest_path) as f:
                 m = json.load(f)
             installed[m["id"]] = (m.get("version"), m.get("author"))
-        if not installed:
+        findings = preflight(path, budget=PREFLIGHT_BUDGET) if os.path.isdir(path) else []
+        if not installed and not findings:
             continue
         print(f"\n{short(path)}")
+        for line in findings:
+            print(f"  WARN: {line}")
         for plugin_id, (version, author) in sorted(installed.items()):
             state = "on " if plugin_id in enabled else "off"
             flag = "  <-- BANNED" if plugin_id in banned and plugin_id in enabled else ""
@@ -386,6 +390,86 @@ def bookmark_bases(vault_name, vault_path):
     return lines
 
 
+def compile_exclude(entry):
+    """One `excluded_files` entry -> the string Obsidian stores in `userIgnoreFilters` (Settings -> Files and
+    links -> Excluded files). `/…/` is a regular expression and is passed as written; an entry with a `/` in it
+    is a vault-relative path prefix and is passed as written; a bare name (`node_modules`) means "a folder of
+    this name at any depth" and becomes the regex `/(^|\\/)node_modules\\//`."""
+    entry = str(entry).strip()
+    if len(entry) > 1 and entry.startswith("/") and entry.endswith("/"):
+        return entry
+    if "/" in entry:
+        return entry
+    escaped = "".join("\\" + c if c in "\\^$.|?*+()[]{}" else c for c in entry)
+    return "/(^|\\/)" + escaped + "\\//"
+
+
+def excluded_files_for(manifest, profile):
+    """Obsidian's Excluded files for a vault of this profile: the top-level `excluded_files` list (every vault)
+    plus the profile's own, in order, compiled and de-duplicated."""
+    entries = list(manifest.get("excluded_files") or []) + list((manifest["profiles"].get(profile) or {}).get("excluded_files") or [])
+    return list(dict.fromkeys(compile_exclude(e) for e in entries))
+
+
+def apply_excluded_files(vault, filters):
+    """Add `filters` to the vault's Excluded files, keeping whatever is already there (idempotent)."""
+    # UNDOCUMENTED-API(excluded-files): `app.vault.getConfig('userIgnoreFilters')` is the array the Settings pane
+    # (Files and links -> Excluded files) edits, null until first set; `app.vault.setConfig(key, value)` is what
+    # the pane calls to persist it (-> `.obsidian/app.json`, written by Obsidian) and it fires `config-changed`,
+    # which the metadata cache listens to (`app.metadataCache.userIgnoreFilters` follows). Verified app 1.14.4,
+    # 2026-10-26, throwaway vault: app.json gained the entries, search/graph hid a matching folder.
+    # Breaks as: 'NO setConfig', or `.obsidian/app.json` without `userIgnoreFilters` after the call.
+    # Fallback: Settings -> Files and links -> Excluded files -> Manage, one entry per line.
+    payload = json.dumps(filters)
+    code = (
+        "(()=>{if(typeof app.vault.setConfig!=='function'||typeof app.vault.getConfig!=='function') return 'NO setConfig';"
+        " const want=%s; const cur=app.vault.getConfig('userIgnoreFilters'); const list=Array.isArray(cur)?cur.slice():[];"
+        " const added=want.filter(w=>!list.includes(w)); if(added.length) app.vault.setConfig('userIgnoreFilters',list.concat(added));"
+        " const now=app.vault.getConfig('userIgnoreFilters')||[];"
+        " return 'OK '+JSON.stringify({added:added.length,total:now.length,cache:(app.metadataCache.userIgnoreFilters||[]).length})})()"
+    ) % payload
+    return cli_eval(code, vault)
+
+
+PREFLIGHT_PRUNE = {".git"}   # Obsidian does not index .git; skipping it keeps the walk fast
+PREFLIGHT_BUDGET = 15        # seconds new/open/apply spend on the walk before handing the rest to `doctor <folder>`
+
+
+def preflight(vault_path, budget=None):
+    """Read-only walk of a vault folder. Returns one line per thing that makes Obsidian fail to load the vault
+    or index what it should not: a directory the current user cannot read (Obsidian aborts the vault with
+    EACCES), and a symlink whose target is outside the vault (Obsidian follows it, e.g. a committed symlink
+    to /tmp walked /private/tmp into a root-owned folder, 2026-10-26). Does not follow symlinks itself.
+    With `budget` (seconds) the walk stops early and the last line says so: a big monorepo vault takes minutes."""
+    root = os.path.realpath(vault_path)
+    findings = []
+    deadline = time.monotonic() + budget if budget else None
+    def rel(path):
+        return os.path.relpath(path, vault_path)
+    def on_error(err):
+        if isinstance(err, PermissionError):
+            findings.append(f"unreadable directory: {rel(err.filename)}")
+    for dirpath, dirnames, filenames in os.walk(vault_path, onerror=on_error, followlinks=False):
+        if deadline and time.monotonic() > deadline:
+            findings.append(f"pre-flight stopped after {budget} s at {rel(dirpath)}; run `obsidian-vault-setup doctor {short(vault_path)}` for the full walk")
+            break
+        dirnames[:] = [d for d in dirnames if d not in PREFLIGHT_PRUNE]
+        for name in dirnames + filenames:
+            full = os.path.join(dirpath, name)
+            if os.path.islink(full):
+                target = os.path.realpath(full)
+                if target != root and not target.startswith(root + os.sep):
+                    findings.append(f"symlink outside vault: {rel(full)} -> {os.readlink(full)}")
+    return findings
+
+
+def print_preflight(vault_path):
+    findings = preflight(vault_path, budget=PREFLIGHT_BUDGET)
+    for line in findings:
+        print(f"  WARN: {line}")
+    return findings
+
+
 def apply_core_settings(vault, plugin_id, settings):
     # UNDOCUMENTED-API(core-plugin-settings): `app.internalPlugins.getPluginById(id)` returns the core plugin;
     # its `instance.options` is the settings object the Settings pane edits, and `saveData(options)` is what
@@ -469,6 +553,7 @@ def setup(path, profile, extras, register, roster):
         sys.exit("Obsidian is not running. Open it first (agents do not launch or quit it).")
     if not os.path.isdir(path):
         sys.exit(f"{short(path)} is not a folder.")
+    print_preflight(path)   # unreadable directories and symlinks out of the vault; Obsidian may refuse to load it
     vaults = registered_vaults()
     others = vaults.get(name, set()) - {path}
     if others:
@@ -530,6 +615,11 @@ def setup(path, profile, extras, register, roster):
     for plugin_id, settings in core_settings_for(manifest, profile).items():
         result = apply_core_settings(name, plugin_id, settings)
         (report if result.startswith("OK") else handoffs).append(f"core settings {plugin_id}: {result}")
+    # Excluded files (Settings -> Files and links), so build output and caches stay out of search and graph.
+    excluded = excluded_files_for(manifest, profile)
+    if excluded:
+        result = apply_excluded_files(name, excluded)
+        (report if result.startswith("OK") else handoffs).append(f"excluded files: {result}")
     # Bases (*.base) bookmarked so each is one click away in the Bookmarks pane (John, 2026-10-19).
     if bookmark_bases_for(manifest, profile):
         for line in bookmark_bases(name, path):
@@ -586,6 +676,7 @@ def cmd_open(args):
         if not wait_for_cli():
             sys.exit("Obsidian did not answer the CLI within 40 s.")
     if root in registered_vaults().get(name, set()):
+        print_preflight(root)
         # Documented macOS path: Obsidian opens the registered vault that contains a folder it is handed.
         subprocess.run(["open", "-a", "Obsidian", root])
         message = f"Opened vault {name}"
@@ -599,8 +690,8 @@ def cmd_open(args):
     return status
 
 
-def cmd_doctor(_args):
-    """Probe the CLI and each undocumented API without changing anything."""
+def cmd_doctor(args):
+    """Probe the CLI and each undocumented API without changing anything; with a folder, pre-flight it too."""
     problems = 0
     def check(label, ok, detail=""):
         nonlocal problems
@@ -633,7 +724,18 @@ def cmd_doctor(_args):
     probe = cli_eval("(()=>{const p=app.internalPlugins.getPluginById('switcher');"
                      " return p&&typeof p.saveData==='function'&&p.instance&&typeof p.instance.options==='object'?'ok':'missing'})()", host)
     check("core plugin registry + saveData (core-plugin-settings)", probe == "ok", probe)
+    # UNDOCUMENTED-API(excluded-files): vault config get/set and the metadata cache's filter list exist.
+    probe = cli_eval("(()=>{const c=app.vault.getConfig('userIgnoreFilters'); return typeof app.vault.setConfig==='function'"
+                     "&&(c===null||c===undefined||Array.isArray(c))&&Array.isArray(app.metadataCache.userIgnoreFilters)?'ok':'missing'})()", host)
+    check("vault config get/set + metadata cache filters (excluded-files)", probe == "ok", probe)
     check("brat-addplugin", True, "probed at use time (needs BRAT loaded in the target vault)")
+    folder = getattr(args, "folder", None)
+    if folder:
+        folder = os.path.abspath(os.path.expanduser(folder))
+        findings = preflight(folder) if os.path.isdir(folder) else [f"not a folder: {short(folder)}"]
+        check(f"pre-flight {short(folder)}", not findings, "" if not findings else f"{len(findings)} finding(s)")
+        for line in findings:
+            print(f"       {line}")
     return 1 if problems else 0
 
 
@@ -766,9 +868,11 @@ def cmd_new(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--version", action="version", version=f"obsidian-vault-setup {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
-    sub.add_parser("scan")
-    sub.add_parser("doctor")
+    sub.add_parser("scan", help="read-only: every registered vault, its plugins and pre-flight findings")
+    dr = sub.add_parser("doctor", help="probe the CLI and every undocumented API; with a folder, pre-flight it (exit 1 on findings)")
+    dr.add_argument("folder", nargs="?", help="a vault folder to pre-flight: unreadable directories, symlinks out of the vault")
     sub.add_parser("install-finder-button", help="build ~/Applications/Open in Obsidian.app (also the obsidian-vault-setup:// URL handler)")
     url = sub.add_parser("url", help="print the clickable obsidian-vault-setup://open?path=… link for a folder")
     url.add_argument("folder", nargs="?", default=".", help="a folder, or with --decode the link")

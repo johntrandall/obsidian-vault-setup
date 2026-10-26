@@ -37,6 +37,15 @@ core_settings:
 bookmark_bases: true
 
 # --------------------------------------------------------------------------------------------------
+# excluded_files: Obsidian's Excluded files (Settings -> Files and links), applied to EVERY vault this tool
+# sets up, so build output and caches stay out of search, graph, the quick switcher and link suggestions.
+# A bare name means a folder of that name at any depth (compiled to the regex /(^|\/)name\//); an entry
+# with a `/` in it is a vault-relative path prefix; `/…/` is a regular expression, passed as written.
+# Existing entries in the vault are kept. A profile may carry its own `excluded_files:` list, which adds.
+# --------------------------------------------------------------------------------------------------
+excluded_files: [node_modules, .venv, dist, build, __pycache__, .pytest_cache, working-logs]
+
+# --------------------------------------------------------------------------------------------------
 # profiles: named sets of plugins to switch ON. `obsidian-new-vault --profile <name>`; the default is
 # core-only. A profile may only name plugins listed under `plugins:` below.
 # --------------------------------------------------------------------------------------------------

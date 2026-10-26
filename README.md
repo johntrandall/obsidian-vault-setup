@@ -22,8 +22,8 @@ plugin write their own files.
 | You, clicking a link | `obsidian-vault-setup://open?path=<url-encoded absolute path>` | Same, from anything that can open a URL: a terminal status line, a launcher, a note. The Finder button app is the handler. `obsidian-vault-setup url <folder>` prints the link. Paths outside your home folder are refused. |
 | You or an agent | `obsidian-new-vault [<folder>] --profile <p>` | Create a vault (does not look for the git root). |
 | Agent | `obsidian-vault-setup apply <vault> --profile <p> [--roster]` | Bring an existing vault to a profile. Idempotent; never switches off what someone switched on. |
-| Anyone | `obsidian-vault-setup scan` | Read-only: every registered vault and its plugins. |
-| Anyone | `obsidian-vault-setup doctor` | Probe the CLI and every undocumented API. Run this first when something fails. |
+| Anyone | `obsidian-vault-setup scan` | Read-only: every registered vault, its plugins, and its [pre-flight](#pre-flight) findings. |
+| Anyone | `obsidian-vault-setup doctor [<folder>]` | Probe the CLI and every undocumented API; with a folder, pre-flight it (exit 1 on findings). Run this first when something fails. |
 | Agent | `obsidian-vault-setup forget <folder>` | Unregister a closed vault (files untouched). |
 
 Log for the Finder button and hotkey: `~/Library/Logs/obsidian-vault-setup.log`.
@@ -57,6 +57,8 @@ A plugin's `settings:` are saved through its own `settings` object + `saveSettin
 convention). A plugin that keeps no such pair names its own save call in `settings_save`, a JavaScript snippet
 run inside the app with `p` (the loaded plugin) and `s` (the settings) in scope, returning `'OK …'`; Window
 Title's is `p.setTemplate(s.template); p.flushSave()`.
+
+`excluded_files` lists what every vault keeps out of search, graph, the quick switcher and link suggestions (Obsidian's Settings → Files and links → Excluded files): build output and caches. A bare name (`node_modules`) means a folder of that name at any depth; an entry with a `/` is a vault-relative path prefix; `/…/` is a regular expression passed as written. The vault's existing entries are kept, so a run adds and never removes. A profile may add its own list. The example excludes `node_modules`, `.venv`, `dist`, `build`, `__pycache__`, `.pytest_cache` and `working-logs`.
 
 `bookmark_bases: true` bookmarks every Obsidian Base (`*.base`) in the vault through `obsidian bookmark`, titled `Base · <name>`, keeping bookmarks that already exist; it runs on every `new`, `open` and `apply`, so a Base created later is bookmarked on the next pass. A profile may set its own `bookmark_bases`.
 The config file can be a symlink, e.g. into a repo where you keep it under version control.
@@ -103,11 +105,23 @@ which Obsidian answers with "Vault not found" for any folder that is not already
 link works for every project. `obsidian-vault-setup url <folder>` prints it; `url --decode <link>` prints
 the folder a link resolves to (nothing and exit 1 when refused), which is what the handler calls. A relative path (`dev/project`, or `~/dev/project`) is taken under your home folder: the short form the link-bridge `/vault-setup` page forwards.
 
+## Pre-flight
+
+Two things in a folder make Obsidian fail to load it as a vault, or index what it should not: a directory the
+current user cannot read (Obsidian aborts the whole vault with `EACCES: permission denied, scandir …`), and a
+symlink whose target is outside the vault (Obsidian follows it; a committed `working-logs -> /tmp` walked
+`/private/tmp` into a root-owned folder, 2026-10-26). `new`, `open` and `apply` walk the folder first and print
+one `WARN:` line per finding, then carry on; the walk is capped at 15 s (a monorepo vault takes minutes) and says
+so when it stops early. `doctor <folder>` does the full walk and exits 1 on findings; `scan` reports every
+registered vault's findings. Read-only; it fixes nothing. The fix is in the repository: make the directory
+readable, or replace the symlink with a real (ignored) directory.
+
 ## Tests
 
 `python3 -m pytest tests/` — the link builder and decoder, the `url` CLI, the `core_settings` merge, the
-`always_on` list and the `settings_save` hook code, and (on macOS) that `install-finder-button` builds an
-applet declaring the scheme. Nothing in the suite talks to Obsidian.
+`always_on` list and the `settings_save` hook code, the `excluded_files` compiler and merge, the pre-flight walk
+(unreadable directory, symlink out of the vault, `.git` skipped, time budget), and (on macOS) that
+`install-finder-button` builds an applet declaring the scheme. Nothing in the suite talks to Obsidian.
 
 
 ## How each step is done
@@ -123,6 +137,7 @@ applet declaring the scheme. Nothing in the suite talks to Obsidian.
 | Plugin settings, plugin without `saveSettings` | the save call the config names in `settings_save` (Window Title: `setTemplate` + `flushSave`) via `obsidian eval` | **No**: `plugin-settings-hook` |
 | Bookmark the vault's Bases | `obsidian bookmark file=<path>.base title="Base · <name>"` for each `*.base` (text contains `views:`) not already in `.obsidian/bookmarks.json` (read only) | Yes |
 | Core-plugin settings | `app.internalPlugins.getPluginById(id).instance.options` + `saveData(options)` via `obsidian eval` | **No**: `core-plugin-settings` |
+| Excluded files | `app.vault.getConfig('userIgnoreFilters')` + `app.vault.setConfig(…)` via `obsidian eval` (adds what is missing) | **No**: `excluded-files` |
 | Enable / disable | `obsidian plugin:enable` / `plugin:disable` | Yes |
 | Identity check | `obsidian plugin id=<id>` → author must match the manifest | Yes |
 | Unregister | `electron.ipcRenderer.sendSync('vault-remove', path)` via `obsidian eval` | **No**: `vault-remove-ipc` |
@@ -139,6 +154,7 @@ call site in `bin/obsidian-vault-setup`; `doctor` probes all but `brat-addplugin
 | `plugin-settings` | `app.plugins.plugins[id].settings` + `await saveSettings()` | Obsidian sample-plugin convention, not a public contract | Track Changes 2.2.0, 2026-10-13 | `NOT LOADED` / `NO saveSettings`; value reverts after reload | Settings → Community plugins → plugin | Verified (survives disable/enable) |
 | `plugin-settings-hook` | the per-plugin snippet in the config's `settings_save`, run with `p` = loaded plugin, `s` = settings; Window Title 0.1.1: `p.setTemplate(s.template); p.flushSave()` → `data.json` `{version:1, template}` | the plugin's own `main.ts` (`setTemplate`, `flushSave`, `SettingsStore`) | Window Title 0.1.1 on app 1.14.4, 2026-10-19 | TypeError (method renamed) or a return that is not `OK …` → HAND-OFF line | Settings → Community plugins → Window Title → Template | Verified (template saved, title updated in both windows) |
 | `core-plugin-settings` | `app.internalPlugins.getPluginById(id)`: `instance.options` + `await saveData(options)` → `.obsidian/<id>.json` | `obsidian-1.14.4.asar`, `InternalPlugin.saveData(e){ vault.writeConfigJson(this.instance.id, e) }`; what the Settings pane calls | app 1.14.4, 2026-10-19 | `NO CORE PLUGIN` / `NO saveData`; `.obsidian/<id>.json` unchanged (note: `saveData()` without the argument writes nothing) | Settings → the core plugin's pane | Verified (`switcher.showAllFileTypes`, 5 vaults) |
+| `excluded-files` | `app.vault.getConfig('userIgnoreFilters')` (array or null) + `app.vault.setConfig('userIgnoreFilters', list)` → `.obsidian/app.json`, fires `config-changed`, `app.metadataCache.userIgnoreFilters` follows | `obsidian-1.14.4.asar`: what the Excluded files dialog (Settings → Files and links) saves | app 1.14.4, 2026-10-26 | `NO setConfig`; `.obsidian/app.json` without `userIgnoreFilters`; `isUserIgnored()` false for a listed folder | Settings → Files and links → Excluded files → Manage | Verified (throwaway vault: 7 entries written by Obsidian, cache followed, `isUserIgnored` true at any depth, idempotent re-run added 0) |
 | `brat-addplugin` | `betaPlugins.addPlugin(repo, false, false, false, '', false, enableAfterInstall)` | BRAT 2.2.0 `main.js` | BRAT 2.2.0, 2026-10-13 | `BRAT not loaded`, TypeError, plugin never lands | `obsidian://brat?plugin=<owner/repo>`, click Add Plugin | Verified (1 plugin) |
 
 Verified app version is pinned in the code as `VERIFIED_APP_VERSION`; `doctor` warns when it differs.
