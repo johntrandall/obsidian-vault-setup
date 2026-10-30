@@ -1,0 +1,5 @@
+/* wide: a note with cssclasses: wide uses the whole pane and its code blocks never wrap (John, 2026-10-28, the D13 mock) */
+.wide .markdown-preview-sizer, .wide .cm-sizer { max-width: 100% !important; }
+.wide pre, .wide pre code, .wide .markdown-rendered pre code { white-space: pre !important; overflow-x: auto !important; word-break: normal !important; overflow-wrap: normal !important; }
+.wide .cm-s-obsidian .HyperMD-codeblock, .wide .cm-s-obsidian .HyperMD-codeblock .cm-line { white-space: pre !important; }
+.wide .cm-s-obsidian .cm-content { overflow-x: auto; }
