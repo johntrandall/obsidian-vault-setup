@@ -55,7 +55,7 @@ SHARE_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))   # rep
 EXAMPLE_CONFIG = os.path.join(SHARE_DIR, "config.example.yaml")
 FINDER_SCRIPT = os.path.join(SHARE_DIR, "finder", "open-in-obsidian.applescript")
 FINDER_APP = os.path.expanduser("~/Applications/Open in Obsidian.app")
-__version__ = "0.1.12"
+__version__ = "0.1.13"
 VERIFIED_APP_VERSION = "1.14.4"   # the undocumented APIs below were last verified on this app version
 OBSIDIAN_JSON = os.path.expanduser("~/Library/Application Support/obsidian/obsidian.json")
 CLI = shutil.which("obsidian") or "/Applications/Obsidian.app/Contents/MacOS/obsidian"
@@ -823,15 +823,22 @@ def is_watchbill_home(path):
     return False
 
 
+WATCHBILL_HOME_PROFILES = ("watchbill-system", "review-repo")   # first one the config has wins (0.1.13: watchbill-system)
+
+
 def default_profile_for(path, requested, manifest=None):
-    """The profile `open` and `new` use when none is named: review-repo for a watchbill system's home (when the
-    config has that profile), else core-only. A named profile always wins."""
+    """The profile `open` and `new` use when none is named: for a watchbill system's home, `watchbill-system`
+    when the config has that profile (0.1.13: review-repo plus the plugins every watchbill board needs, such as
+    Custom Selectors for the card's lane dropdown; John, 2026-10-29, on the obsidian-vault-lifecycle card), else
+    `review-repo`; for any other folder core-only. A named profile always wins."""
     if requested:
         return requested
     manifest = manifest or load_manifest()
-    if "review-repo" in manifest.get("profiles", {}) and is_watchbill_home(path):
-        print(f"profile review-repo: {short(path)} is a watchbill system's home")
-        return "review-repo"
+    if is_watchbill_home(path):
+        for profile in WATCHBILL_HOME_PROFILES:
+            if profile in manifest.get("profiles", {}):
+                print(f"profile {profile}: {short(path)} is a watchbill system's home")
+                return profile
     return "core-only"
 
 

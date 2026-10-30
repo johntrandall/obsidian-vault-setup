@@ -97,8 +97,17 @@ def test_brat_plugins_present_from_config_or_brat_list(tool, tmp_path, monkeypat
     assert tool.brat_plugins_present(MANIFEST, "v", str(tmp_path)) is False
 
 
-def test_version_is_0_1_12(tool):
-    assert tool.__version__ == "0.1.12"
+def test_version_is_0_1_13(tool):
+    assert tool.__version__ == "0.1.13"
+
+
+def test_watchbill_home_prefers_the_watchbill_system_profile(tool, tmp_path, monkeypatch):
+    monkeypatch.setattr(tool.shutil, "which", lambda name: None)
+    (tmp_path / "dev-docs" / "substantive").mkdir(parents=True)
+    both = {"profiles": {"core-only": {}, "review-repo": {}, "watchbill-system": {}}}
+    assert tool.default_profile_for(str(tmp_path), None, both) == "watchbill-system"
+    only_review = {"profiles": {"core-only": {}, "review-repo": {}}}
+    assert tool.default_profile_for(str(tmp_path), None, only_review) == "review-repo"
 
 
 def test_default_profile_is_review_repo_for_a_watchbill_home(tool, tmp_path, monkeypatch):
