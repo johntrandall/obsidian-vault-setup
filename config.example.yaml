@@ -45,6 +45,21 @@ bookmark_bases: true
 # --------------------------------------------------------------------------------------------------
 excluded_files: [node_modules, .venv, dist, build, __pycache__, .pytest_cache, working-logs]
 
+# snippets: CSS snippets EVERY vault gets (a profile may add its own `snippets:` list). Each entry is a name or
+# {name, file, enabled}: `file` is relative to this config file's folder (default snippets/<name>.css);
+# `enabled: true` (the default) switches it on in Settings -> Appearance -> CSS snippets. The file is written once
+# through Obsidian's own file adapter and never over an existing snippet of that name.
+snippets:
+  - name: wide            # a note with `cssclasses: wide` uses the whole pane and its code blocks never wrap
+    file: snippets/wide.css
+    enabled: true
+
+# brat_auto_update: BRAT (obsidian42-brat) stays switched ON, with its update-at-startup setting on, in every
+# vault that has a plugin installed through BRAT (`install: brat`), so GitHub-only plugins update themselves when
+# the vault opens. `false` restores the pre-0.1.12 behaviour: BRAT switched off again after an install, plugins
+# frozen at the installed version. A bad release then reaches every vault on its next open: release gates matter.
+brat_auto_update: true
+
 # --------------------------------------------------------------------------------------------------
 # profiles: named sets of plugins to switch ON. `obsidian-new-vault --profile <name>`; the default is
 # core-only. A profile may only name plugins listed under `plugins:` below.

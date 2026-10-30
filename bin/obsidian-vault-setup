@@ -19,7 +19,8 @@ Commands:
                                                          handler for obsidian-vault-setup://open?path=<encoded path> links
   url   [<folder>]                                       print that clickable link for a folder
 
-Config (roster, profiles, always_on, settings, core_settings, bookmark_bases, banned list), first found of:
+Config (roster, profiles, always_on, settings, core_settings, bookmark_bases, excluded_files, snippets,
+brat_auto_update, banned list), first found of:
   $OBSIDIAN_VAULT_SETUP_CONFIG, $XDG_CONFIG_HOME/obsidian-vault-setup/config.yaml (~/.config/...).
   Start from config.example.yaml: `obsidian-vault-setup init-config`.
 
@@ -54,7 +55,7 @@ SHARE_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))   # rep
 EXAMPLE_CONFIG = os.path.join(SHARE_DIR, "config.example.yaml")
 FINDER_SCRIPT = os.path.join(SHARE_DIR, "finder", "open-in-obsidian.applescript")
 FINDER_APP = os.path.expanduser("~/Applications/Open in Obsidian.app")
-__version__ = "0.1.11"
+__version__ = "0.1.12"
 VERIFIED_APP_VERSION = "1.14.4"   # the undocumented APIs below were last verified on this app version
 OBSIDIAN_JSON = os.path.expanduser("~/Library/Application Support/obsidian/obsidian.json")
 CLI = shutil.which("obsidian") or "/Applications/Obsidian.app/Contents/MacOS/obsidian"
@@ -409,6 +410,86 @@ def compile_exclude(entry):
     return "/(^|\\/)" + escaped + "\\//"
 
 
+def brat_auto_update_for(manifest):
+    """True (the default) when BRAT stays switched ON, with update-at-startup, in every vault that has a plugin
+    installed through BRAT, so John's GitHub plugins (the Track Changes fork, Base Bookmarks) update themselves.
+    `brat_auto_update: false` at the top of the config restores the pre-0.1.12 behaviour (BRAT switched off again
+    after an install). John, 2026-10-28, on BRAT left on with update-at-startup: "This sounds good." (D11 of the
+    Base Bookmarks design); confirmed 2026-10-29 on the obsidian-vault-lifecycle card, "yes, just do it"."""
+    return bool(manifest.get("brat_auto_update", True))
+
+
+def brat_plugins_present(manifest, vault_name, vault_path):
+    """True when a plugin the config installs through BRAT is in this vault, or BRAT's own list names any repo
+    (read, never written, from .obsidian/plugins/obsidian42-brat/data.json)."""
+    installed = installed_plugins(vault_name)
+    if any(p.get("install") == "brat" and pid in installed for pid, p in manifest["plugins"].items()):
+        return True
+    try:
+        with open(os.path.join(vault_path, ".obsidian", "plugins", "obsidian42-brat", "data.json"), encoding="utf-8") as f:
+            return bool(json.load(f).get("pluginList"))
+    except (OSError, ValueError):
+        return False
+
+
+def snippets_for(manifest, profile):
+    """CSS snippets a vault of this profile gets: the top-level `snippets` list (every vault) plus the profile's
+    own, merged by name, the later entry winning. An entry is a name or {name, file, enabled}; `file` is relative
+    to the config file's folder (default `snippets/<name>.css`), `enabled` defaults to true."""
+    merged = {}
+    for entry in list(manifest.get("snippets") or []) + list((manifest["profiles"].get(profile) or {}).get("snippets") or []):
+        if isinstance(entry, str):
+            entry = {"name": entry}
+        name = entry["name"]
+        merged[name] = {"name": name, "file": entry.get("file") or f"snippets/{name}.css",
+                        "enabled": bool(entry.get("enabled", True))}
+    return list(merged.values())
+
+
+def snippet_source(entry, manifest_path=None):
+    """The snippet's CSS source on disk: `file` as given when absolute, else beside the config file (its real
+    path, since the config is often a symlink into a repository)."""
+    base = os.path.dirname(os.path.realpath(manifest_path or MANIFEST))
+    return entry["file"] if os.path.isabs(entry["file"]) else os.path.join(base, entry["file"])
+
+
+def snippet_code(name, css):
+    """The JavaScript `obsidian eval` runs to put a CSS snippet into the vault, built here so tests can read it:
+    writes `.obsidian/snippets/<name>.css` through Obsidian's own file adapter when no file of that name exists
+    (an existing one is John's or another tool's and is left as it is), then asks Obsidian to re-read its
+    snippet list. Enabling is the CLI's `snippet:enable`."""
+    # UNDOCUMENTED-API(snippets-adapter): `app.vault.adapter.exists/mkdir/write` (the adapter every plugin uses
+    # for config-dir files) and `app.customCss.requestLoadSnippets()`, which the Appearance pane calls to re-read
+    # `.obsidian/snippets/`. Breaks as: TypeError on requestLoadSnippets, or the snippet missing from Settings ->
+    # Appearance -> CSS snippets after the run. Fallback: copy the .css into .obsidian/snippets/ by hand and switch
+    # it on in Settings -> Appearance.
+    return ("(async()=>{const dir=app.vault.configDir+'/snippets'; const path=dir+'/'+%s+'.css';"
+            " if(!(await app.vault.adapter.exists(dir))) await app.vault.adapter.mkdir(dir);"
+            " const had=await app.vault.adapter.exists(path); if(!had) await app.vault.adapter.write(path,%s);"
+            " if(app.customCss&&typeof app.customCss.requestLoadSnippets==='function') app.customCss.requestLoadSnippets();"
+            " return 'OK '+JSON.stringify({written:!had})})()" % (json.dumps(name), json.dumps(css)))
+
+
+def apply_snippet(vault, entry):
+    """Install one snippet (see snippet_code) and, when the entry wants it, switch it on with `snippet:enable`.
+    Returns a line starting with 'OK' on success."""
+    source = snippet_source(entry)
+    try:
+        with open(source, encoding="utf-8") as f:
+            css = f.read()
+    except OSError as e:
+        return f"NO SOURCE {short(source)} ({e.strerror})"
+    result = cli_eval(snippet_code(entry["name"], css), vault)
+    if not result.startswith("OK"):
+        return result or "no reply from eval"
+    if entry["enabled"]:
+        time.sleep(1)
+        out = cli("snippet:enable", f"name={entry['name']}", vault=vault)
+        if "rror" in out or "not found" in out.lower():
+            return f"written but not enabled: {out}"
+    return result + (" enabled" if entry["enabled"] else " (left off)")
+
+
 def excluded_files_for(manifest, profile):
     """Obsidian's Excluded files for a vault of this profile: the top-level `excluded_files` list (every vault)
     plus the profile's own, in order, compiled and de-duplicated."""
@@ -535,7 +616,8 @@ def brat_registered(vault_path, repo):
 
 
 def brat_install(vault, repo, plugin_id=None, reinstall=False):
-    """Install a GitHub plugin with BRAT's own addPlugin(), inside the app. Left switched off. With
+    """Install a GitHub plugin with BRAT's own addPlugin(), inside the app. BRAT is switched on for the call
+    and, since 0.1.12, left on (setup() sets update-at-startup) unless the config says brat_auto_update: false. With
     `reinstall`, the plugin id is already in the vault from somewhere else (the community directory): BRAT
     replaces its files and the call waits for the installed manifest version to change."""
     before = installed_plugins(vault).get(plugin_id) if plugin_id else None
@@ -666,13 +748,26 @@ def setup(path, profile, extras, register, roster):
     if excluded:
         result = apply_excluded_files(name, excluded)
         (report if result.startswith("OK") else handoffs).append(f"excluded files: {result}")
+    # CSS snippets every vault gets (John, 2026-10-29, "yes, just do it" on the wide-snippet card of
+    # obsidian-vault-lifecycle): written once through Obsidian's adapter, never over an existing file of that name.
+    for entry in snippets_for(manifest, profile):
+        result = apply_snippet(name, entry)
+        (report if result.startswith("OK") else handoffs).append(f"snippet {entry['name']}: {result}")
     # Bases (*.base) bookmarked so each is one click away in the Bookmarks pane (John, 2026-10-19).
     if bookmark_bases_for(manifest, profile):
         for line in bookmark_bases(name, path):
             (report if line.startswith("bookmarked") else handoffs).append(line)
-    # Never switch off a plugin someone switched on: only BRAT, if this run switched it on.
-
-    if "obsidian42-brat" not in to_enable and brat_switched_on[0]:
+    # BRAT stays ON, with update-at-startup, wherever a BRAT-installed plugin lives, so John's GitHub plugins
+    # update themselves (brat_auto_update_for). Before 0.1.12 the tool switched BRAT off here, so BRAT's own
+    # updateAtStartup never ran and the Track Changes fork stayed at the version it was installed with.
+    if brat_auto_update_for(manifest) and brat_plugins_present(manifest, name, path):
+        if "obsidian42-brat" not in enabled_plugins(name):
+            cli("plugin:enable", "id=obsidian42-brat", vault=name)
+            time.sleep(2)
+        result = apply_settings(name, "obsidian42-brat", {"updateAtStartup": True})
+        (report if result.startswith("OK") else handoffs).append(f"BRAT left on, update at startup: {result}")
+    elif "obsidian42-brat" not in to_enable and brat_switched_on[0]:
+        # Never switch off a plugin someone switched on: only BRAT, if this run switched it on.
         cli("plugin:disable", "id=obsidian42-brat", vault=name)
     time.sleep(3)
     enabled_now = enabled_plugins(name)
@@ -710,6 +805,36 @@ def wait_for_cli(seconds=40):
     return False
 
 
+def is_watchbill_home(path):
+    """True when `path` is a registered watchbill system's home (`watchbill systems find` names it), or carries a
+    system's decision board (`dev-docs/substantive/`). Every watchbill system is reviewed with Track Changes, so
+    such a folder gets the review-repo profile unless a profile is named (a watchbill system's vault came up on
+    core-only with Track Changes installed and off, susan-bones-performance-diagnostics, 2026-10-29; John: "have
+    that system get fixed")."""
+    if os.path.isdir(os.path.join(path, "dev-docs", "substantive")):
+        return True
+    if shutil.which("watchbill"):
+        try:
+            out = subprocess.run(["watchbill", "systems", "find", path], capture_output=True, text=True, timeout=20,
+                                 cwd="/", stdin=subprocess.DEVNULL)
+            return out.returncode == 0 and os.path.realpath(path) in out.stdout
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+    return False
+
+
+def default_profile_for(path, requested, manifest=None):
+    """The profile `open` and `new` use when none is named: review-repo for a watchbill system's home (when the
+    config has that profile), else core-only. A named profile always wins."""
+    if requested:
+        return requested
+    manifest = manifest or load_manifest()
+    if "review-repo" in manifest.get("profiles", {}) and is_watchbill_home(path):
+        print(f"profile review-repo: {short(path)} is a watchbill system's home")
+        return "review-repo"
+    return "core-only"
+
+
 def cmd_open(args):
     """Open the vault at the folder's git root (or the folder); create it if it is not a vault yet."""
     folder = os.path.abspath(os.path.expanduser(args.folder))
@@ -730,7 +855,7 @@ def cmd_open(args):
         if args.notify:
             notify(message)
         return 0
-    status = setup(root, args.profile, [], register=True, roster=True)
+    status = setup(root, default_profile_for(root, args.profile), [], register=True, roster=True)
     if args.notify:
         notify(f"Created vault {name}" + (" (see log: hand-offs)" if status else ""))
     return status
@@ -909,7 +1034,7 @@ def cmd_apply(args):
 
 def cmd_new(args):
     path = os.path.abspath(os.path.expanduser(args.folder))
-    return setup(path, args.profile, args.extra, register=True, roster=True)
+    return setup(path, default_profile_for(path, args.profile), args.extra, register=True, roster=True)
 
 
 def main():
@@ -929,12 +1054,12 @@ def main():
     fg.add_argument("folder")
     op = sub.add_parser("open", help="open the vault at the folder's git root, or create it")
     op.add_argument("folder", nargs="?", default=".")
-    op.add_argument("--profile", default="core-only")
+    op.add_argument("--profile", default=None, help="default: review-repo for a watchbill system's home, else core-only")
     op.add_argument("--launch", action="store_true", help="start Obsidian if it is not running (the Finder button and hotkey pass this)")
     op.add_argument("--notify", action="store_true", help="macOS notification with the result")
     new = sub.add_parser("new", help="make a folder a vault, install the whole roster, enable the profile's set")
     new.add_argument("folder", nargs="?", default=".")
-    new.add_argument("--profile", default="core-only")
+    new.add_argument("--profile", default=None, help="default: review-repo for a watchbill system's home, else core-only")
     new.add_argument("--extra", nargs="*", default=[])
     for name in ("plan", "apply"):
         s = sub.add_parser(name)
