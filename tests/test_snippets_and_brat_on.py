@@ -97,8 +97,17 @@ def test_brat_plugins_present_from_config_or_brat_list(tool, tmp_path, monkeypat
     assert tool.brat_plugins_present(MANIFEST, "v", str(tmp_path)) is False
 
 
-def test_version_is_0_1_14(tool):
-    assert tool.__version__ == "0.1.14"
+def test_version_is_0_1_15(tool):
+    assert tool.__version__ == "0.1.15"
+
+
+def test_dropdown_lookup_failure_on_a_watchbill_home_is_a_handoff(tool, tmp_path, monkeypatch):
+    monkeypatch.setattr(tool, "watchbill_system_name", lambda path: None)
+    monkeypatch.setattr(tool.shutil, "which", lambda name: "/usr/local/bin/watchbill")
+    monkeypatch.setattr(tool, "is_watchbill_home", lambda path: True)
+    assert tool.watchbill_dropdown(str(tmp_path)).startswith("card-lane dropdown: this folder is a watchbill home")
+    monkeypatch.setattr(tool, "is_watchbill_home", lambda path: False)
+    assert tool.watchbill_dropdown(str(tmp_path)) is None
 
 
 FIXTURES = ROOT / "tests" / "fixtures" / "decisions-dropdown"   # copied from watchbill's contract fixtures (2026-10-30)
