@@ -97,8 +97,51 @@ def test_brat_plugins_present_from_config_or_brat_list(tool, tmp_path, monkeypat
     assert tool.brat_plugins_present(MANIFEST, "v", str(tmp_path)) is False
 
 
-def test_version_is_0_1_13(tool):
-    assert tool.__version__ == "0.1.13"
+def test_version_is_0_1_14(tool):
+    assert tool.__version__ == "0.1.14"
+
+
+FIXTURES = ROOT / "tests" / "fixtures" / "decisions-dropdown"   # copied from watchbill's contract fixtures (2026-10-30)
+
+
+def test_dropdown_parser_reads_every_contract_fixture(tool):
+    files = sorted(FIXTURES.glob("*.txt"))
+    assert len(files) == 8
+    for f in files:
+        ok, result, text = tool.parse_dropdown_line(f.read_text())
+        assert text, f.name
+        if f.name.startswith("ok-"):
+            assert ok and result in ("OK written", "OK unchanged", "OK rewritten"), f.name
+        else:
+            assert not ok and result.startswith("SKIP "), f.name
+    ok, result, text = tool.parse_dropdown_line((FIXTURES / "skip-wrong-vault.txt").read_text())
+    assert result == "SKIP WRONG VAULT claude-notes"
+    assert tool.parse_dropdown_line("") == (False, "", "no output")
+
+
+def test_watchbill_dropdown_reports_ok_or_handoff(tool, tmp_path, monkeypatch):
+    class R:
+        def __init__(self, rc, out, err=""): self.returncode, self.stdout, self.stderr = rc, out, err
+    monkeypatch.setattr(tool, "watchbill_system_name", lambda path: "events")
+    monkeypatch.setattr(tool.subprocess, "run", lambda *a, **k: R(0, (FIXTURES / "ok-written.txt").read_text()))
+    assert tool.watchbill_dropdown(str(tmp_path)).startswith("OK written: ")
+    monkeypatch.setattr(tool.subprocess, "run", lambda *a, **k: R(0, (FIXTURES / "skip-plugin-not-loaded.txt").read_text()))
+    assert tool.watchbill_dropdown(str(tmp_path)).startswith("card-lane dropdown SKIP plugin not loaded: ")
+    monkeypatch.setattr(tool.subprocess, "run", lambda *a, **k: R(2, "", "watchbill: no system named events"))
+    assert "exit 2" in tool.watchbill_dropdown(str(tmp_path))
+    monkeypatch.setattr(tool, "watchbill_system_name", lambda path: None)
+    assert tool.watchbill_dropdown(str(tmp_path)) is None
+
+
+def test_watchbill_system_name_from_find_row(tool, tmp_path, monkeypatch):
+    class R:
+        def __init__(self, rc, out): self.returncode, self.stdout = rc, out
+    monkeypatch.setattr(tool.shutil, "which", lambda name: "/usr/local/bin/watchbill")
+    row = f"events  {os.path.realpath(str(tmp_path))}\n   ║ INTAKE: how to hand it work\n"
+    monkeypatch.setattr(tool.subprocess, "run", lambda *a, **k: R(0, row))
+    assert tool.watchbill_system_name(str(tmp_path)) == "events"
+    monkeypatch.setattr(tool.subprocess, "run", lambda *a, **k: R(1, ""))
+    assert tool.watchbill_system_name(str(tmp_path)) is None
 
 
 def test_watchbill_home_prefers_the_watchbill_system_profile(tool, tmp_path, monkeypatch):

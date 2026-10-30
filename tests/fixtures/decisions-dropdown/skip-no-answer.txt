@@ -1,0 +1,1 @@
+SKIP no answer: Obsidian did not answer for vault events (Vault not found.)

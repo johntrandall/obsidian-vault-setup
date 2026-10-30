@@ -1,0 +1,1 @@
+SKIP not a vault: the home is not its own Obsidian vault (events)

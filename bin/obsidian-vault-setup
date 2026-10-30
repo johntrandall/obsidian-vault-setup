@@ -55,7 +55,7 @@ SHARE_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))   # rep
 EXAMPLE_CONFIG = os.path.join(SHARE_DIR, "config.example.yaml")
 FINDER_SCRIPT = os.path.join(SHARE_DIR, "finder", "open-in-obsidian.applescript")
 FINDER_APP = os.path.expanduser("~/Applications/Open in Obsidian.app")
-__version__ = "0.1.13"
+__version__ = "0.1.14"
 VERIFIED_APP_VERSION = "1.14.4"   # the undocumented APIs below were last verified on this app version
 OBSIDIAN_JSON = os.path.expanduser("~/Library/Application Support/obsidian/obsidian.json")
 CLI = shutil.which("obsidian") or "/Applications/Obsidian.app/Contents/MacOS/obsidian"
@@ -757,6 +757,12 @@ def setup(path, profile, extras, register, roster):
     if bookmark_bases_for(manifest, profile):
         for line in bookmark_bases(name, path):
             (report if line.startswith("bookmarked") else handoffs).append(line)
+    # A watchbill system's home: watchbill writes the card-lane dropdown now that the vault is in front and Custom
+    # Selectors is in (John, 2026-10-29, on the obsidian-vault-lifecycle card: "yes. on the obsidian setup").
+    if "custom-selectors" in installed_plugins(name):
+        line = watchbill_dropdown(path)
+        if line:
+            (report if line.startswith("OK") else handoffs).append(line)
     # BRAT stays ON, with update-at-startup, wherever a BRAT-installed plugin lives, so John's GitHub plugins
     # update themselves (brat_auto_update_for). Before 0.1.12 the tool switched BRAT off here, so BRAT's own
     # updateAtStartup never ran and the Track Changes fork stayed at the version it was installed with.
@@ -821,6 +827,59 @@ def is_watchbill_home(path):
         except (OSError, subprocess.TimeoutExpired):
             return False
     return False
+
+
+def watchbill_system_name(path):
+    """The registered watchbill system whose home is `path` (the first token of `watchbill systems find`'s row),
+    or None when there is no watchbill CLI or no such system."""
+    if not shutil.which("watchbill"):
+        return None
+    try:
+        out = subprocess.run(["watchbill", "systems", "find", path], capture_output=True, text=True, timeout=20,
+                             cwd="/", stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if out.returncode != 0:
+        return None
+    real = os.path.realpath(path)
+    for line in out.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and os.path.realpath(parts[-1]) == real:
+            return parts[0]
+    return None
+
+
+def parse_dropdown_line(line):
+    """Read `watchbill decisions dropdown`'s one stdout line (contract: watchbill dev-docs/contracts/decisions-dropdown.md;
+    fixtures copied to tests/fixtures/decisions-dropdown/): returns (ok, result, text), where `result` is everything before
+    the first ': ' (OK written | OK unchanged | OK rewritten | SKIP <reason>) and `ok` is True for an OK result."""
+    line = (line or "").strip()
+    if not line:
+        return False, "", "no output"
+    result, _, text = line.partition(": ")
+    return result.startswith("OK"), result, text
+
+
+def watchbill_dropdown(path):
+    """Ask watchbill to write the card-lane dropdown (the Custom Selectors selector for `_human_verdict`, with
+    watchbill's own lanes) into this vault, which the caller has just brought to the front. watchbill 0.10.84:
+    `watchbill decisions dropdown <system>` writes only the plugin's settings, never the repository, and prints one
+    line (OK written|unchanged|rewritten, or SKIP <reason>: WRONG VAULT, plugin not loaded, no answer, no CLI, not a
+    vault). Returns a report line starting with 'OK' or a hand-off line; None when the folder is no watchbill home.
+    The lanes are watchbill's vocabulary, so this tool never writes the selector itself (agreement with watchbill's
+    architect, 2026-10-30, obsidian-vault-lifecycle dev-docs/runs/2026-10-29-brat-on-and-snippets/agreement-watchbill-dropdown.md)."""
+    system = watchbill_system_name(path)
+    if not system:
+        return None
+    try:
+        out = subprocess.run(["watchbill", "decisions", "dropdown", system], capture_output=True, text=True,
+                             timeout=120, cwd="/", stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return f"watchbill decisions dropdown {system}: did not run ({e.__class__.__name__})"
+    if out.returncode != 0:
+        return f"watchbill decisions dropdown {system}: exit {out.returncode} ({(out.stderr or out.stdout).strip()[:160]})"
+    ok, result, text = parse_dropdown_line(out.stdout)
+    return f"{result}: {text}" if ok else f"card-lane dropdown {result}: {text}"
 
 
 WATCHBILL_HOME_PROFILES = ("watchbill-system", "review-repo")   # first one the config has wins (0.1.13: watchbill-system)
