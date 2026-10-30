@@ -55,7 +55,7 @@ SHARE_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))   # rep
 EXAMPLE_CONFIG = os.path.join(SHARE_DIR, "config.example.yaml")
 FINDER_SCRIPT = os.path.join(SHARE_DIR, "finder", "open-in-obsidian.applescript")
 FINDER_APP = os.path.expanduser("~/Applications/Open in Obsidian.app")
-__version__ = "0.1.14"
+__version__ = "0.1.15"
 VERIFIED_APP_VERSION = "1.14.4"   # the undocumented APIs below were last verified on this app version
 OBSIDIAN_JSON = os.path.expanduser("~/Library/Application Support/obsidian/obsidian.json")
 CLI = shutil.which("obsidian") or "/Applications/Obsidian.app/Contents/MacOS/obsidian"
@@ -720,6 +720,13 @@ def setup(path, profile, extras, register, roster):
                 continue
             report.append(f"installed {plugin_id} {installed_plugins(name).get(plugin_id)}")
         author = plugin_info(name, plugin_id).get("author", "?")
+        if author == "?":
+            # The CLI gave no answer (busy, another vault answered, a transient): unknown is not a mismatch. Leave the
+            # plugin as it is and say so. (0.1.15: a pass on 2026-10-30 switched Obsidian Git off in a vault on a
+            # '?' read; the manifest.json said Vinzent all along.)
+            handoffs.append(f"{plugin_id}: author not readable this run (manifest expects {p['expected_author']!r}); "
+                            "left as it is, check with `obsidian plugin id=` later")
+            continue
         if author != p["expected_author"]:
             handoffs.append(f"{plugin_id}: installed author is {author!r}, manifest expects "
                             f"{p['expected_author']!r}; switched off, decide by hand")
@@ -870,6 +877,8 @@ def watchbill_dropdown(path):
     architect, 2026-10-30, obsidian-vault-lifecycle dev-docs/runs/2026-10-29-brat-on-and-snippets/agreement-watchbill-dropdown.md)."""
     system = watchbill_system_name(path)
     if not system:
+        if shutil.which("watchbill") and is_watchbill_home(path):
+            return "card-lane dropdown: this folder is a watchbill home but `watchbill systems find` named no system for it this run; run `watchbill decisions dropdown <system>` by hand"
         return None
     try:
         out = subprocess.run(["watchbill", "decisions", "dropdown", system], capture_output=True, text=True,
