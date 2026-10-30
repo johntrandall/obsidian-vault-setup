@@ -55,7 +55,7 @@ SHARE_DIR = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))   # rep
 EXAMPLE_CONFIG = os.path.join(SHARE_DIR, "config.example.yaml")
 FINDER_SCRIPT = os.path.join(SHARE_DIR, "finder", "open-in-obsidian.applescript")
 FINDER_APP = os.path.expanduser("~/Applications/Open in Obsidian.app")
-__version__ = "0.1.15"
+__version__ = "0.1.16"
 VERIFIED_APP_VERSION = "1.14.4"   # the undocumented APIs below were last verified on this app version
 OBSIDIAN_JSON = os.path.expanduser("~/Library/Application Support/obsidian/obsidian.json")
 CLI = shutil.which("obsidian") or "/Applications/Obsidian.app/Contents/MacOS/obsidian"
@@ -574,13 +574,32 @@ def apply_core_settings(vault, plugin_id, settings):
     return cli_eval(code, vault)
 
 
+def gui_banner_wanted():
+    """The agent-working banner is raised only when an AI agent runs the command (CLAUDE_SESSION_ID set), the
+    `gui-takeover` helper exists and GUI_TAKEOVER_OFF is unset; a person running the command gets no banner."""
+    return bool(os.environ.get("CLAUDE_SESSION_ID") and shutil.which("gui-takeover") and not os.environ.get("GUI_TAKEOVER_OFF"))
+
+
 def gui_announce(message):
-    """When run by an AI agent (CLAUDE_SESSION_ID set) and a `gui-takeover` helper exists, announce the new
-    window before it appears. Optional; a person running the command gets no banner."""
-    if os.environ.get("CLAUDE_SESSION_ID") and shutil.which("gui-takeover") and not os.environ.get("GUI_TAKEOVER_OFF"):
+    """Announce the new window before it appears (the countdown, then the banner). Pair with gui_release() the
+    moment the window is there: the banner is for the window's appearance only."""
+    if gui_banner_wanted():
         try:
             subprocess.run(["gui-takeover", "5", message], stdin=subprocess.DEVNULL,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        except subprocess.TimeoutExpired:
+            pass
+
+
+def gui_release():
+    """Take the banner down. Until 0.1.16 nothing called this, so the banner outlived the window by up to the
+    helper's idle watchdog (120 s); John, 2026-10-30 ~12:35, in the obsidian-track-changes architect's tab, relayed
+    by its intake note: "Can you uh adjust our obsidian skills so that this only goes up during the time that it
+    needs to go up?"."""
+    if gui_banner_wanted() and shutil.which("gui-release"):
+        try:
+            subprocess.run(["gui-release"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, timeout=15)
         except subprocess.TimeoutExpired:
             pass
 
@@ -589,16 +608,19 @@ def register_vault(path, name):
     vaults = registered_vaults()
     host = host_vault()
     gui_announce(f"Opening {short(path)} as a new Obsidian vault (one new window, no clicks)")
-    # UNDOCUMENTED-API(vault-open-ipc): the main-process IPC the vault switcher's "Open folder as vault"
-    # button sends. Found by reading obsidian-<ver>.asar (ipcMain.on("vault-open",(e,path,create)=>…)).
-    # Breaks as: eval prints an error or `false`, vault never appears in `obsidian vaults`.
-    # Fallback: vault switcher -> Open folder as vault, then re-run `apply`.
-    result = cli_eval("electron.ipcRenderer.sendSync('vault-open', %s, false)" % json.dumps(path), host)
-    for _ in range(10):
-        time.sleep(2)
-        if path in registered_vaults().get(name, set()) and "Vault not found" not in cli("vault", vault=name):
-            return None
-    return f"registration failed (vault-open returned {result!r})"
+    try:
+        # UNDOCUMENTED-API(vault-open-ipc): the main-process IPC the vault switcher's "Open folder as vault"
+        # button sends. Found by reading obsidian-<ver>.asar (ipcMain.on("vault-open",(e,path,create)=>…)).
+        # Breaks as: eval prints an error or `false`, vault never appears in `obsidian vaults`.
+        # Fallback: vault switcher -> Open folder as vault, then re-run `apply`.
+        result = cli_eval("electron.ipcRenderer.sendSync('vault-open', %s, false)" % json.dumps(path), host)
+        for _ in range(10):
+            time.sleep(2)
+            if path in registered_vaults().get(name, set()) and "Vault not found" not in cli("vault", vault=name):
+                return None
+        return f"registration failed (vault-open returned {result!r})"
+    finally:
+        gui_release()   # the window is there (or the attempt is over): the banner comes down at once
 
 
 brat_switched_on = [False]

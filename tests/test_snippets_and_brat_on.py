@@ -97,8 +97,32 @@ def test_brat_plugins_present_from_config_or_brat_list(tool, tmp_path, monkeypat
     assert tool.brat_plugins_present(MANIFEST, "v", str(tmp_path)) is False
 
 
-def test_version_is_0_1_15(tool):
-    assert tool.__version__ == "0.1.15"
+def test_version_is_0_1_16(tool):
+    assert tool.__version__ == "0.1.16"
+
+
+def test_register_vault_releases_the_banner_on_success_and_failure(tool, tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setenv("CLAUDE_SESSION_ID", "test")
+    monkeypatch.delenv("GUI_TAKEOVER_OFF", raising=False)
+    monkeypatch.setattr(tool.shutil, "which", lambda name: f"/usr/local/bin/{name}")
+    monkeypatch.setattr(tool.subprocess, "run", lambda cmd, **k: calls.append(cmd[0]))
+    monkeypatch.setattr(tool, "host_vault", lambda: "host")
+    monkeypatch.setattr(tool, "cli_eval", lambda code, vault: "true")
+    monkeypatch.setattr(tool, "cli", lambda *a, **k: "")
+    monkeypatch.setattr(tool.time, "sleep", lambda s: None)
+    monkeypatch.setattr(tool, "registered_vaults", lambda: {"v": {str(tmp_path)}})
+    assert tool.register_vault(str(tmp_path), "v") is None
+    assert calls == ["gui-takeover", "gui-release"]
+    calls.clear()
+    monkeypatch.setattr(tool, "registered_vaults", lambda: {})
+    assert tool.register_vault(str(tmp_path), "v").startswith("registration failed")
+    assert calls == ["gui-takeover", "gui-release"]          # released on the failure path too
+    calls.clear()
+    monkeypatch.delenv("CLAUDE_SESSION_ID")
+    monkeypatch.setattr(tool, "registered_vaults", lambda: {"v": {str(tmp_path)}})
+    assert tool.register_vault(str(tmp_path), "v") is None
+    assert calls == []                                         # a person running it: no banner, no release
 
 
 def test_dropdown_lookup_failure_on_a_watchbill_home_is_a_handoff(tool, tmp_path, monkeypatch):
