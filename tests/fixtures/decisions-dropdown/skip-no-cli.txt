@@ -1,0 +1,1 @@
+SKIP no CLI: no `obsidian` command on PATH (Obsidian's command line)
